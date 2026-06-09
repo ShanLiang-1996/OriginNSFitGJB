@@ -1,0 +1,25 @@
+Offline wheelhouse manifest
+Target: Windows x64, CPython 3.12
+Total size: 74,342,403 bytes
+
+altgraph-0.17.5-py2.py3-none-any.whl                 21,228
+et_xmlfile-2.0.0-py3-none-any.whl                    18,059
+numpy-2.4.6-cp312-cp312-win_amd64.whl             12,321,687
+openpyxl-3.1.5-py2.py3-none-any.whl                 250,910
+OriginExt-1.2.5-cp312-none-win_amd64.whl            375,384
+originpro-1.1.15-py3-none-any.whl                    56,108
+originpy-0.0.2-py3-none-any.whl                       2,479
+packaging-26.2-py3-none-any.whl                     100,195
+pandas-3.0.3-cp312-cp312-win_amd64.whl            9,755,463
+pefile-2024.8.26-py3-none-any.whl                    74,766
+pip-26.1.1-py3-none-any.whl                       1,812,777
+pyinstaller-6.20.0-py3-none-win_amd64.whl         1,391,851
+pyinstaller_hooks_contrib-2026.5-py3-none-any.whl   457,314
+python_dateutil-2.9.0.post0-py2.py3-none-any.whl    229,892
+pywin32-311-cp312-cp312-win_amd64.whl             9,495,040
+pywin32_ctypes-0.2.3-py3-none-any.whl                30,756
+scipy-1.17.1-cp312-cp312-win_amd64.whl           36,549,682
+setuptools-82.0.1-py3-none-any.whl                1,006,223
+six-1.17.0-py2.py3-none-any.whl                      11,050
+tzdata-2026.2-py2.py3-none-any.whl                  349,321
+wheel-0.47.0-py3-none-any.whl                        32,218

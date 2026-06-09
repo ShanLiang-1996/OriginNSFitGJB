@@ -106,7 +106,7 @@ def read_grouped_delimited(path: Path, delimiter: str) -> list[DataTable]:
             index += 1
             continue
 
-        if _looks_like_sn_header(row):
+        if _looks_like_strain_life_header(row):
             headers = _unique_headers(row)
             index += 1
             data_rows: list[list[str]] = []
@@ -115,7 +115,7 @@ def read_grouped_delimited(path: Path, delimiter: str) -> list[DataTable]:
                 if _is_blank_row(current):
                     index += 1
                     continue
-                if _is_group_row(current) or _looks_like_sn_header(current):
+                if _is_group_row(current) or _looks_like_strain_life_header(current):
                     break
                 data_rows.append(current)
                 index += 1
@@ -158,7 +158,7 @@ def _is_group_row(row: list[str]) -> bool:
     return not any(keyword in lowered for keyword in LIFE_COLUMN_KEYWORDS + RESPONSE_COLUMN_KEYWORDS)
 
 
-def _looks_like_sn_header(row: list[str]) -> bool:
+def _looks_like_strain_life_header(row: list[str]) -> bool:
     lowered = [cell.lower().strip() for cell in row if cell.strip()]
     if len(lowered) < 2:
         return False
@@ -192,34 +192,21 @@ def _frame_from_rows(headers: list[str], rows: list[list[str]]) -> pd.DataFrame:
     return frame
 
 
-def numeric_xy_columns(frame: pd.DataFrame, x: str | None, y: str | None) -> tuple[str, str]:
-    if x and y:
-        return x, y
-
-    numeric_columns = list(frame.select_dtypes(include="number").columns)
-    if x:
-        candidates = [column for column in numeric_columns if column != x]
-        if not candidates:
-            raise ValueError("Need at least one numeric Y column.")
-        return x, y or candidates[0]
-    if y:
-        candidates = [column for column in numeric_columns if column != y]
-        if not candidates:
-            raise ValueError("Need at least one numeric X column.")
-        return candidates[0], y
-    if len(numeric_columns) < 2:
-        raise ValueError("Need at least two numeric columns for X/Y fitting.")
-    return numeric_columns[0], numeric_columns[1]
-
-
-def sn_xy_columns(frame: pd.DataFrame, life: str | None, response: str | None) -> tuple[str, str]:
+def strain_life_columns(
+    frame: pd.DataFrame,
+    life: str | None,
+    response: str | None,
+) -> tuple[str, str]:
+    """Resolve the life and response columns used by the GJB workflow."""
+    # Step 1 - Prefer explicit user selections, then fall back to known column keywords.
     life_column = life or _find_column_by_keywords(frame, LIFE_COLUMN_KEYWORDS)
     response_column = response or _find_column_by_keywords(frame, RESPONSE_COLUMN_KEYWORDS)
 
+    # Step 2 - Fall back to numeric columns when names are not recognizable.
     numeric_columns = list(frame.select_dtypes(include="number").columns)
     if life_column is None or response_column is None:
         if len(numeric_columns) < 2:
-            raise ValueError("Need at least two numeric columns for S-N curve fitting.")
+            raise ValueError("Need at least two numeric columns for GJB strain-life fitting.")
         if life_column is None:
             medians = {
                 column: float(np.nanmedian(np.abs(frame[column].to_numpy(dtype=float))))
@@ -229,6 +216,7 @@ def sn_xy_columns(frame: pd.DataFrame, life: str | None, response: str | None) -
         if response_column is None:
             response_column = next(column for column in numeric_columns if column != life_column)
 
+    # Step 3 - Validate the resolved columns before returning them to the caller.
     if life_column == response_column:
         raise ValueError("Life and response columns must be different.")
     if life_column not in frame.columns:

@@ -1,8 +1,18 @@
-# OriginNSFitGJB
+﻿# OriginNSFitGJB
 
-OriginNSFitGJB is a focused split from `OriginNSFit` for batch strain-life fitting and Origin plotting automation. The command line defaults to the simplified GJB/Z 18A 9.3.2 strain-life workflow (`gjb932-strain`) and can export CSV review tables, Origin projects, and PNG figures.
+OriginNSFitGJB 用于批量读取疲劳寿命与应变/应力响应数据，按 GJB/Z 18A 9.3.2 的简化应变寿命方法完成拟合、复核表导出，并自动操控 Origin 生成工程图与项目文件。
 
-## Environment
+本项目只保留 GJB/Z 18A 9.3.2 Formula 136 相关流程。拟合关系为：
+
+```text
+log10(Nf) = A1 + A2 * log10(response - A4)
+```
+
+其中 `response` 使用输入数据中的应变或应力响应列；当前简化实现不拟合 A3，直接把该响应列作为等效应变输入。
+
+## 环境准备
+
+联网环境：
 
 ```powershell
 python -m venv .venv
@@ -11,58 +21,120 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --no-build-isolation --no-deps -e .
 ```
 
-`originpro`/`originpy` require Origin or OriginPro on the target Windows machine for real automation. Use `--dry-run` to verify fitting and CSV output without starting Origin.
-
-## Run
+离线环境：
 
 ```powershell
-.\.venv\Scripts\python.exe -m originnsfitgjb --input examples --output output --pattern gjb932_strain_example.csv --status status --dry-run
+powershell -ExecutionPolicy Bypass -File .\offline\install_offline.ps1
 ```
 
-Remove `--dry-run` on a machine with Origin installed:
+离线包说明见 [offline/README.md](offline/README.md)。`originpro`/`originpy` 需要目标 Windows 电脑已安装并激活 Origin 或 OriginPro。
+
+## 数据格式
+
+CSV、TSV、TXT、XLS、XLSX 均可作为输入。最小列要求：
+
+- 寿命列：如 `life`、`N`、`寿命`、`cycles`
+- 响应列：如 `strain`、`stress`、`应变幅`、`最大应变`、`应力幅`
+- 状态列可选：如 `status`，值中包含 `runout`、`suspended`、`未失效` 等会按删失/停试点处理
+
+示例：
+
+```csv
+specimen_id,strain,life,status
+GJB-001,0.0120,520,failure
+GJB-002,0.0105,780,failure
+GJB-005,0.0065,3500,runout
+```
+
+## 只计算并导出 CSV
+
+```powershell
+.\.venv\Scripts\python.exe -m originnsfitgjb --input examples --output output --pattern gjb18a_strain_example.csv --status status --dry-run
+```
+
+如果列名无法自动识别，可显式指定：
+
+```powershell
+.\.venv\Scripts\python.exe -m originnsfitgjb --input data --output output --life "life" --response "strain" --status "status" --dry-run
+```
+
+## 生成 Origin 项目
+
+确认 dry-run 成功后，去掉 `--dry-run`：
 
 ```powershell
 .\.venv\Scripts\python.exe -m originnsfitgjb --input data --output output --pattern "*.csv" --status status
 ```
 
-Common output files:
+默认输出：
 
 ```text
-output/e739_summary.csv
-output/e739_transformed_data.csv
-output/e739_curve_bands.csv
-output/e739_level_stats.csv
-output/e739_initialols.csv
-output/e739_initialnls.csv
-output/e739_varianceanalysis.csv
-output/e739_refitdata.csv
-output/e739_refitresult.csv
-output/e739_parametersignificance.csv
-output/e739_residuals.csv
-output/e739_finalmle.csv
-output/e739_likelihood.csv
-output/e739_analysis.opj
-output/figures/
+output\gjb_analysis.opj
+output\figures\
 ```
 
-## Build EXE
+可选参数：
+
+```powershell
+--project output\my_gjb_analysis.opju
+--graph-template C:\path\to\gjb_template.otpu
+--linearized-graph
+--no-runout-arrows
+--hidden-origin
+```
+
+## 输出文件
+
+常用输出：
+
+```text
+output\gjb_summary.csv
+output\gjb_fit_data.csv
+output\gjb_runout_data.csv
+output\gjb_curve.csv
+output\gjb_level_stats.csv
+output\gjb_initialols.csv
+output\gjb_initialnls.csv
+output\gjb_varianceanalysis.csv
+output\gjb_refitdata.csv
+output\gjb_refitresult.csv
+output\gjb_parametersignificance.csv
+output\gjb_fixeda4linearfit.csv
+output\gjb_residuals.csv
+output\gjb_outlieriterations.csv
+output\gjb_finalmle.csv
+output\gjb_likelihood.csv
+output\gjb_modelchecks.csv
+```
+
+## 打包 exe
 
 ```powershell
 .\.venv\Scripts\pyinstaller.exe OriginNSFitGJB.spec
 ```
 
-The executable is written to:
+打包结果：
 
 ```text
 dist\OriginNSFitGJB.exe
 ```
 
-## Layout
+## Origin 排错
+
+如果 CSV 能生成但 Origin 项目失败：
+
+1. 确认目标电脑已安装并能手动打开 Origin/OriginPro。
+2. 确认没有首次启动弹窗、许可证弹窗或用户文件夹设置弹窗阻塞自动化。
+3. 先运行 `--dry-run` 确认数据与拟合流程无误。
+4. 查看 `output\origin_automation.log` 中的真实异常。
+
+## 目录结构
 
 ```text
-src/originnsfitgjb/      Python package and Origin automation code
-examples/                Small CSV examples for verification
-data/                    Local input data, ignored by Git except .gitkeep
-output/                  Generated CSV/Origin/figure output, ignored by Git except .gitkeep
-OriginNSFitGJB.spec      PyInstaller configuration
+src/originnsfitgjb/      GJB 拟合、数据读取、Origin 自动化源码
+examples/                可直接运行的 GJB 示例数据
+data/                    本地输入数据，默认不纳入 Git
+output/                  运行输出，默认不纳入 Git
+offline/                 离线部署脚本与 wheelhouse
+OriginNSFitGJB.spec      PyInstaller 打包配置
 ```

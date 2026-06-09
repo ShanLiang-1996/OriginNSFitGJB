@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = []
 for package_name in ("originpro", "OriginExt", "originpy", "win32com"):
@@ -9,13 +9,11 @@ for package_name in ("originpro", "OriginExt", "originpy", "win32com"):
     except Exception:
         pass
 
-datas = collect_data_files("originnsfitgjb", includes=["templates/*.otpu"])
-
 a = Analysis(
     ["scripts/run_originnsfitgjb.py"],
     pathex=["src"],
     binaries=[],
-    datas=datas,
+    datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

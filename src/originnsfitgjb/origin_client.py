@@ -9,8 +9,7 @@ import re
 
 import pandas as pd
 
-from .e739 import E739Fit
-from .fitting import SNCurveFit
+from .gjb import GJBFit
 
 
 class OriginAutomationError(RuntimeError):
@@ -18,8 +17,8 @@ class OriginAutomationError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class OriginE739Job:
-    fit: E739Fit
+class OriginGJBJob:
+    fit: GJBFit
     label: str
     title: str
 
@@ -65,52 +64,9 @@ class OriginClient:
             pass
         self._resource_stack.close()
 
-    def plot_sn_curve(
+    def create_gjb_project(
         self,
-        fit: SNCurveFit,
-        life_column: str,
-        response_column: str,
-        output_path: Path,
-        title: str,
-        symbol_kind: int = 3,
-    ) -> Path:
-        wks = self._op.new_sheet("w")
-        wks.from_list(0, fit.data[life_column].tolist(), life_column, axis="X")
-        wks.from_list(1, fit.data[response_column].tolist(), response_column, axis="Y")
-        wks.from_list(2, fit.curve[life_column].tolist(), f"{life_column}_fit", axis="X")
-        wks.from_list(3, fit.curve[response_column].tolist(), f"{response_column}_fit", axis="Y")
-
-        graph = self._op.new_graph()
-        layer = graph[0]
-        data_plot = layer.add_plot(wks, 1, 0, type="scatter")
-        fit_plot = layer.add_plot(wks, 3, 2, type="line")
-
-        if data_plot is not None:
-            data_plot.symbol_kind = symbol_kind
-            data_plot.symbol_size = 15
-            data_plot.symbol_interior = 1
-            data_plot.set_cmd("-c 1", "-w 1500")
-        if fit_plot is not None:
-            fit_plot.set_cmd("-c 2", "-w 1000")
-
-        layer.xscale = "log10"
-        layer.yscale = "linear"
-        layer.rescale()
-        self._style_grid(layer)
-        self._set_axis_labels(layer, life_column, response_column)
-        self._add_formula_label(layer, fit, life_column, response_column, title)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        graph.activate()
-        exported = graph.save_fig(str(output_path.resolve()), width=1600)
-        exported_path = Path(exported) if exported else output_path
-        if not exported_path.exists():
-            raise OriginAutomationError(f"Origin did not export figure: {output_path}")
-        return exported_path
-
-    def create_e739_project(
-        self,
-        jobs: list[OriginE739Job],
+        jobs: list[OriginGJBJob],
         summary: pd.DataFrame,
         output_path: Path,
         figures_dir: Path | None = None,
@@ -120,21 +76,24 @@ class OriginClient:
         include_linearized_graph: bool = False,
         show_runout_arrows: bool = True,
     ) -> tuple[Path, list[dict[str, str]]]:
+        # Step 1 - Start from a clean Origin project before writing GJB results.
         self._op.new(False)
         if not jobs:
-            raise OriginAutomationError("No E739 analysis jobs to write to Origin.")
+            raise OriginAutomationError("No GJB analysis jobs to write to Origin.")
 
-        summary_book = self._op.new_book("w", lname="E739 Summary")
-        summary_book.name = self._safe_origin_short_name("E739Summary")
+        # Step 2 - Create the project-level summary workbook.
+        summary_book = self._op.new_book("w", lname="GJB Summary")
+        summary_book.name = self._safe_origin_short_name("GJBSummary")
         summary_wks = summary_book[0]
         summary_wks.name = "Summary"
         self._write_frame_to_sheet(summary_wks, summary)
         self._remove_default_blank_workbook()
 
         figure_records: list[dict[str, str]] = []
+        # Step 3 - Write one workbook and one or two graphs for each input table.
         for job in jobs:
             book = self._op.new_book("w", lname=job.title)
-            book.name = self._safe_origin_short_name(job.label, "E739Data")
+            book.name = self._safe_origin_short_name(job.label, "GJBData")
             data_wks = book[0]
             data_wks.name = "Data"
             self._write_frame_to_sheet(data_wks, job.fit.data)
@@ -162,12 +121,12 @@ class OriginClient:
 
             record: dict[str, str] = {"label": job.label}
             if figures_dir is not None:
-                engineering_path = figures_dir / f"{job.label}_e739_engineering.png"
+                engineering_path = figures_dir / f"{job.label}_gjb_engineering.png"
             else:
                 engineering_path = None
 
             record["engineering_figure"] = str(
-                self._plot_e739_engineering(
+                self._plot_gjb_engineering(
                     job,
                     failure_wks,
                     failure_frame,
@@ -185,12 +144,12 @@ class OriginClient:
             record["linearized_figure"] = ""
             if include_linearized_graph:
                 linearized_path = (
-                    figures_dir / f"{job.label}_e739_linearized.png"
+                    figures_dir / f"{job.label}_gjb_linearized.png"
                     if figures_dir is not None
                     else None
                 )
                 record["linearized_figure"] = str(
-                    self._plot_e739_linearized(
+                    self._plot_gjb_linearized(
                         job,
                         failure_wks,
                         failure_frame,
@@ -204,15 +163,16 @@ class OriginClient:
                     or ""
                 )
             elif figures_dir is not None:
-                self._remove_stale_figure(figures_dir / f"{job.label}_e739_linearized.png")
+                self._remove_stale_figure(figures_dir / f"{job.label}_gjb_linearized.png")
             figure_records.append(record)
 
+        # Step 4 - Save the Origin project after all workbooks and graphs are ready.
         saved_project = self._save_project(output_path)
         return saved_project, figure_records
 
-    def _plot_e739_engineering(
+    def _plot_gjb_engineering(
         self,
-        job: OriginE739Job,
+        job: OriginGJBJob,
         failure_wks,
         failure_frame: pd.DataFrame,
         curve_wks,
@@ -224,8 +184,9 @@ class OriginClient:
         use_default_graph_template: bool,
         show_runout_arrows: bool,
     ) -> Path | None:
-        graph = self._new_e739_graph(
-            f"{job.title} E739",
+        # Step 1 - Create or load the engineering graph page.
+        graph = self._new_gjb_graph(
+            f"{job.title} GJB",
             graph_template_path,
             use_default_graph_template,
         )
@@ -234,6 +195,7 @@ class OriginClient:
         self._clear_layer_plots(layer)
         graph_name = self._graph_name(graph)
 
+        # Step 2 - Plot fitted curve first so data markers stay visible.
         self._plotxy_from_wks(
             curve_wks,
             self._column_index(job.fit.curve, "life_fit"),
@@ -243,8 +205,8 @@ class OriginClient:
         )
         self._plotxy_from_wks(
             failure_wks,
-            self._column_index(failure_frame, "e739_life"),
-            self._column_index(failure_frame, "e739_response"),
+            self._column_index(failure_frame, "gjb_life"),
+            self._column_index(failure_frame, "gjb_response"),
             plot_code=201,
             target_graph=graph_name,
         )
@@ -252,8 +214,8 @@ class OriginClient:
         if has_runout:
             self._plotxy_from_wks(
                 runout_wks,
-                self._column_index(runout_frame, "e739_life"),
-                self._column_index(runout_frame, "e739_response"),
+                self._column_index(runout_frame, "gjb_life"),
+                self._column_index(runout_frame, "gjb_response"),
                 plot_code=201,
                 target_graph=graph_name,
             )
@@ -270,6 +232,7 @@ class OriginClient:
                 f"Origin created only {len(plots)} engineering plot(s) for {job.label}."
             )
 
+        # Step 3 - Style plots and axes after Origin has created plot objects.
         if fit_plot is not None:
             self._safe_plot_cmd(fit_plot, "-c 2", "-w 1000")
         if data_plot is not None:
@@ -283,7 +246,7 @@ class OriginClient:
             "log10" if job.fit.result.x_transform == "log" else "linear",
         )
         self._safe_rescale(layer)
-        self._set_e739_engineering_limits(layer, job.fit)
+        self._set_gjb_engineering_limits(layer, job.fit)
         self._style_grid(layer)
         self._delete_legend(layer)
         self._set_axis_label_text(
@@ -291,22 +254,23 @@ class OriginClient:
             "疲劳寿命 N\\-(f) / cycles",
             self._response_presentation(job.fit.result.response_column).axis_label,
         )
-        self._add_e739_engineering_label(layer, job)
+        # Step 4 - Add the fitted equation and optional run-out arrows.
+        self._add_gjb_engineering_label(layer, job)
         if has_runout and show_runout_arrows:
             self._add_runout_text_arrows(
                 layer,
                 runout_frame,
-                x_column="e739_life",
-                y_column="e739_response",
+                x_column="gjb_life",
+                y_column="gjb_response",
                 log_x=True,
             )
         if output_path is None:
             return None
         return self._export_graph(graph, output_path)
 
-    def _plot_e739_linearized(
+    def _plot_gjb_linearized(
         self,
-        job: OriginE739Job,
+        job: OriginGJBJob,
         failure_wks,
         failure_frame: pd.DataFrame,
         curve_wks,
@@ -316,24 +280,26 @@ class OriginClient:
         symbol_kind: int,
         show_runout_arrows: bool,
     ) -> Path | None:
-        graph = self._op.new_graph(lname=f"{job.title} E739 Linearized")
+        # Step 1 - Create the diagnostic linearized graph page.
+        graph = self._op.new_graph(lname=f"{job.title} GJB Linearized")
         if graph is None:
             raise OriginAutomationError("Origin did not create a linearized graph page.")
         layer = graph[0]
         self._clear_layer_plots(layer)
         graph_name = self._graph_name(graph)
 
+        # Step 2 - Plot the linearized fit and observed points.
         self._plotxy_from_wks(
             curve_wks,
-            self._column_index(job.fit.curve, "e739_x"),
+            self._column_index(job.fit.curve, "gjb_x"),
             self._column_index(job.fit.curve, "log10_life_fit"),
             plot_code=200,
             target_graph=graph_name,
         )
         self._plotxy_from_wks(
             failure_wks,
-            self._column_index(failure_frame, "e739_x"),
-            self._column_index(failure_frame, "e739_y_log10_life"),
+            self._column_index(failure_frame, "gjb_x"),
+            self._column_index(failure_frame, "gjb_y_log10_life"),
             plot_code=201,
             target_graph=graph_name,
         )
@@ -341,8 +307,8 @@ class OriginClient:
         if has_runout:
             self._plotxy_from_wks(
                 runout_wks,
-                self._column_index(runout_frame, "e739_x"),
-                self._column_index(runout_frame, "e739_y_log10_life"),
+                self._column_index(runout_frame, "gjb_x"),
+                self._column_index(runout_frame, "gjb_y_log10_life"),
                 plot_code=201,
                 target_graph=graph_name,
             )
@@ -368,26 +334,23 @@ class OriginClient:
 
         self._set_layer_scale(layer, "linear", "linear")
         self._safe_rescale(layer)
-        self._set_e739_linearized_limits(layer, job.fit)
+        self._set_gjb_linearized_limits(layer, job.fit)
         self._style_grid(layer)
         self._delete_legend(layer)
         x_label = self._linearized_x_axis_label(job.fit)
         self._set_axis_label_text(layer, x_label, "log10(N)")
-        self._add_e739_linearized_label(layer, job)
+        self._add_gjb_linearized_label(layer, job)
         if has_runout and show_runout_arrows:
             self._add_runout_text_arrows(
                 layer,
                 runout_frame,
-                x_column="e739_x",
-                y_column="e739_y_log10_life",
+                x_column="gjb_x",
+                y_column="gjb_y_log10_life",
                 log_x=False,
             )
         if output_path is None:
             return None
         return self._export_graph(graph, output_path)
-
-    def _set_axis_labels(self, layer, life_column: str, response_column: str) -> None:
-        self._set_axis_label_text(layer, f"{life_column} (log10)", response_column)
 
     def _set_axis_label_text(self, layer, x_text: str, y_text: str) -> None:
         x_label = layer.label("xb")
@@ -412,29 +375,6 @@ class OriginClient:
         )
         for command in commands:
             self._safe_layer_lt_exec(layer, command)
-
-    def _add_formula_label(
-        self,
-        layer,
-        fit: SNCurveFit,
-        life_column: str,
-        response_column: str,
-        title: str,
-    ) -> None:
-        text = self._origin_formula_text(title, fit)
-        x_position = 10 ** (
-            0.9 * self._safe_log10(fit.result.life_min)
-            + 0.1 * self._safe_log10(fit.result.life_max)
-        )
-        y_position = fit.result.response_min + 0.24 * (
-            fit.result.response_max - fit.result.response_min
-        )
-        label = layer.add_label(text, x_position, y_position)
-        if label is not None:
-            label.set_int("verbatim", 0)
-            label.set_int("attach", 2)
-            label.set_float("x1", x_position)
-            label.set_float("y1", y_position)
 
     def _style_confidence_plot(self, plot) -> None:
         if plot is not None:
@@ -559,18 +499,18 @@ class OriginClient:
         return name[:24]
 
     @staticmethod
-    def _failure_plot_data(fit: E739Fit) -> pd.DataFrame:
-        if "e739_is_failure" not in fit.data.columns:
+    def _failure_plot_data(fit: GJBFit) -> pd.DataFrame:
+        if "gjb_is_failure" not in fit.data.columns:
             return fit.data.copy()
-        return fit.data[fit.data["e739_is_failure"].astype(bool)].copy()
+        return fit.data[fit.data["gjb_is_failure"].astype(bool)].copy()
 
     @staticmethod
-    def _runout_plot_data(fit: E739Fit) -> pd.DataFrame:
+    def _runout_plot_data(fit: GJBFit) -> pd.DataFrame:
         if fit.runout_data is not None and not fit.runout_data.empty:
             return fit.runout_data.copy()
-        if "e739_is_failure" not in fit.data.columns:
+        if "gjb_is_failure" not in fit.data.columns:
             return fit.data.iloc[0:0].copy()
-        return fit.data[~fit.data["e739_is_failure"].astype(bool)].copy()
+        return fit.data[~fit.data["gjb_is_failure"].astype(bool)].copy()
 
     def _write_extra_tables_to_book(
         self,
@@ -663,7 +603,7 @@ class OriginClient:
         except Exception:
             return []
 
-    def _new_e739_graph(
+    def _new_gjb_graph(
         self,
         title: str,
         graph_template_path: Path | None,
@@ -671,7 +611,7 @@ class OriginClient:
     ):
         template_path = graph_template_path
         if template_path is None and use_default_graph_template:
-            template_path = self._default_e739_graph_template()
+            template_path = self._default_gjb_graph_template()
         if template_path is not None and template_path.exists():
             try:
                 graph = self._op.new_graph(lname=title, template=str(template_path.resolve()))
@@ -684,8 +624,8 @@ class OriginClient:
             raise OriginAutomationError("Origin did not create a graph page.")
         return graph
 
-    def _default_e739_graph_template(self) -> Path | None:
-        template = resources.files("originnsfitgjb").joinpath("templates/e739_graph1.otpu")
+    def _default_gjb_graph_template(self) -> Path | None:
+        template = resources.files("originnsfitgjb").joinpath("templates/gjb_graph.otpu")
         if not template.is_file():
             return None
         stack = ExitStack()
@@ -712,7 +652,7 @@ class OriginClient:
             except Exception:
                 pass
 
-    def _set_e739_engineering_limits(self, layer, fit: E739Fit) -> None:
+    def _set_gjb_engineering_limits(self, layer, fit: GJBFit) -> None:
         runout_frame = self._runout_plot_data(fit)
         x_candidates = [
             float(fit.curve["life_fit"].min()),
@@ -722,8 +662,8 @@ class OriginClient:
         ]
         y_candidates = [fit.result.response_min, fit.result.response_max]
         if not runout_frame.empty:
-            runout_life = runout_frame["e739_life"].astype(float)
-            runout_response = runout_frame["e739_response"].astype(float)
+            runout_life = runout_frame["gjb_life"].astype(float)
+            runout_response = runout_frame["gjb_response"].astype(float)
             x_candidates.extend([float(runout_life.min()), float((runout_life * 1.25).max())])
             y_candidates.extend([float(runout_response.min()), float(runout_response.max())])
         x_min = min(x_candidates)
@@ -748,12 +688,12 @@ class OriginClient:
                 )
             )
 
-    def _set_e739_linearized_limits(self, layer, fit: E739Fit) -> None:
+    def _set_gjb_linearized_limits(self, layer, fit: GJBFit) -> None:
         runout_frame = self._runout_plot_data(fit)
         x_min = fit.result.x_min
         x_max = fit.result.x_max
         if not runout_frame.empty:
-            runout_x = runout_frame["e739_x"].astype(float)
+            runout_x = runout_frame["gjb_x"].astype(float)
             x_min = min(x_min, float(runout_x.min()))
             x_max = max(x_max, float(runout_x.max()))
         self._safe_set_xlim(
@@ -765,15 +705,15 @@ class OriginClient:
             ),
         )
         y_min = min(
-            float(fit.data["e739_y_log10_life"].min()),
+            float(fit.data["gjb_y_log10_life"].min()),
             float(fit.curve["log10_life_fit"].min()),
         )
         y_max = max(
-            float(fit.data["e739_y_log10_life"].max()),
+            float(fit.data["gjb_y_log10_life"].max()),
             float(fit.curve["log10_life_fit"].max()),
         )
         if not runout_frame.empty:
-            runout_y = runout_frame["e739_y_log10_life"].astype(float)
+            runout_y = runout_frame["gjb_y_log10_life"].astype(float)
             y_min = min(y_min, float(runout_y.min()))
             y_max = max(y_max, float(runout_y.max()))
         self._safe_set_ylim(layer, *self._expanded_linear_limits(y_min, y_max, pad=0.08))
@@ -792,10 +732,10 @@ class OriginClient:
         except Exception:
             pass
 
-    def _add_e739_linearized_label(self, layer, job: OriginE739Job) -> None:
+    def _add_gjb_linearized_label(self, layer, job: OriginGJBJob) -> None:
         fit = job.fit
         x_position = fit.result.x_min + 0.52 * (fit.result.x_max - fit.result.x_min)
-        y_values = fit.data["e739_y_log10_life"]
+        y_values = fit.data["gjb_y_log10_life"]
         y_min = float(y_values.min())
         y_max = float(y_values.max())
         y_position = y_min + 0.9 * (y_max - y_min)
@@ -807,7 +747,7 @@ class OriginClient:
         )
         self._add_layer_label(layer, text, x_position, y_position)
 
-    def _add_e739_engineering_label(self, layer, job: OriginE739Job) -> None:
+    def _add_gjb_engineering_label(self, layer, job: OriginGJBJob) -> None:
         fit = job.fit
         x_position = 10 ** (
             0.72 * self._safe_log10(fit.result.life_min)
@@ -940,27 +880,14 @@ class OriginClient:
             return False
         return bool(saved and output_path.exists())
 
-    def _origin_formula_text(self, title: str, fit: SNCurveFit) -> str:
-        return (
-            f"{title}\n"
-            f"\\x(0394)\\x(03B5) = {fit.result.coefficient_a:.6g} "
-            f"(N\\-(f))\\+({fit.result.coefficient_b:.6g})\n"
-            f"R\\+(2) = {fit.result.r2:.5f}"
-        )
-
-    def _origin_life_response_formula(self, fit: E739Fit) -> str:
+    def _origin_life_response_formula(self, fit: GJBFit) -> str:
         if fit.result.x_transform != "log":
             return fit.result.life_response_formula
         variable = self._response_presentation(fit.result.response_column).formula_variable
-        if fit.result.model in ("shifted-log", "threshold_log_mle", "gjb932-strain"):
-            shifted_variable = self._origin_shifted_variable(variable, fit.result.coefficient_c)
-            return (
-                f"N\\-(f) = {fit.result.life_response_coefficient_a:.6g} "
-                f"* {shifted_variable}\\+({fit.result.life_response_coefficient_b:.6g})"
-            )
+        shifted_variable = self._origin_shifted_variable(variable, fit.result.coefficient_c)
         return (
             f"N\\-(f) = {fit.result.life_response_coefficient_a:.6g} "
-            f"* ({variable})\\+({fit.result.life_response_coefficient_b:.6g})"
+            f"* {shifted_variable}\\+({fit.result.life_response_coefficient_b:.6g})"
         )
 
     def _origin_shifted_variable(self, variable: str, coefficient_c: float | None) -> str:
@@ -970,10 +897,8 @@ class OriginClient:
             return f"({variable} + {abs(coefficient_c):.6g})"
         return f"({variable} - {coefficient_c:.6g})"
 
-    def _linearized_x_axis_label(self, fit: E739Fit) -> str:
-        if fit.result.model in ("shifted-log", "threshold_log_mle", "gjb932-strain"):
-            return "log10(response - C)"
-        return "log10(response)" if fit.result.x_transform == "log" else "response"
+    def _linearized_x_axis_label(self, fit: GJBFit) -> str:
+        return "log10(strain - A4)"
 
     def _write_frame_to_sheet(self, sheet, frame: pd.DataFrame) -> None:
         try:
@@ -992,24 +917,23 @@ class OriginClient:
     def _response_presentation(self, response_column: str) -> ResponsePresentation:
         text = str(response_column).strip()
         lowered = text.lower().replace("_", " ").replace("-", " ")
-        is_stress = "应力" in text or "stress" in lowered or "sigma" in lowered
-        is_max = any(token in text for token in ("最大", "峰值")) or any(
-            token in lowered
-            for token in ("max", "maximum", "peak")
+        is_stress = "\u5e94\u529b" in text or "stress" in lowered or "sigma" in lowered
+        is_max = any(token in text for token in ("\u6700\u5927", "\u5cf0\u503c")) or any(
+            token in lowered for token in ("max", "maximum", "peak")
         )
-        is_amplitude = "幅" in text or "amplitude" in lowered or lowered.endswith(" amp")
+        is_amplitude = "\u5e45" in text or "amplitude" in lowered or lowered.endswith(" amp")
 
         if is_stress:
             greek = "\\x(03C3)"
             if is_max:
-                return ResponsePresentation(f"最大应力 {greek}\\-(max)", f"{greek}\\-(max)")
+                return ResponsePresentation(f"maximum stress {greek}\\-(max)", f"{greek}\\-(max)")
             if is_amplitude:
                 return ResponsePresentation(f"{text} {greek}\\-(a)", f"{greek}\\-(a)")
             return ResponsePresentation(f"{text} {greek}", greek)
 
         greek = "\\x(03B5)"
         if is_max:
-            return ResponsePresentation(f"最大应变 {greek}\\-(max)", f"{greek}\\-(max)")
+            return ResponsePresentation(f"maximum strain {greek}\\-(max)", f"{greek}\\-(max)")
         if is_amplitude:
             return ResponsePresentation(f"{text} {greek}\\-(a)", f"{greek}\\-(a)")
         return ResponsePresentation(f"{text} {greek}", greek)

@@ -24,9 +24,6 @@ origin-ns-fit-gjb = "originnsfitgjb.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-originnsfitgjb = ["templates/*.otpu"]
-
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -1,9 +1,0 @@
-specimen_id,strain,life,status
-GJB-001,0.0120,520,failure
-GJB-002,0.0105,780,failure
-GJB-003,0.0090,1250,failure
-GJB-004,0.0075,2100,failure
-GJB-005,0.0065,3500,runout
-GJB-006,0.0058,4700,failure
-GJB-007,0.0048,8000,runout
-GJB-008,0.0042,11200,failure
