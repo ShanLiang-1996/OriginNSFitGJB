@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "origin-ns-fit-gjb"
+version = "0.1.0"
+description = "GJB/Z 18A strain-life fitting and Origin plotting automation."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.12",
+    "openpyxl>=3.1",
+    "originpro>=1.1.15",
+    "originpy>=0.0.2",
+    "pywin32>=306; platform_system == 'Windows'",
+]
+
+[project.scripts]
+origin-ns-fit-gjb = "originnsfitgjb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+originnsfitgjb = ["templates/*.otpu"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

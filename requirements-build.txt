@@ -1,0 +1,4 @@
+-r requirements.txt
+pyinstaller>=6.10
+setuptools>=69
+wheel>=0.43

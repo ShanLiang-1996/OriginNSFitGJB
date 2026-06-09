@@ -1,0 +1,10 @@
+E739 run-out示例,,,
+试样ID,最大应变,寿命,状态
+RUN-001,0.0120,520,failure
+RUN-002,0.0105,780,failure
+RUN-003,0.0090,1250,failure
+RUN-004,0.0075,2100,failure
+RUN-005,0.0065,3500,runout
+RUN-006,0.0058,4700,failure
+RUN-007,0.0048,8000,runout
+RUN-008,0.0042,11200,failure
