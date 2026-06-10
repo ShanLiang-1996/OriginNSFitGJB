@@ -122,6 +122,18 @@ class GJBAuditCliTests(unittest.TestCase):
         runout_types = set(mle.loc[~mle["gjb_is_failure"].astype(bool), "likelihood_type"])
         self.assertEqual(failure_types, {"logpdf"})
         self.assertEqual(runout_types, {"logsf"})
+        self.assertTrue(mle["included_in_final_mle"].astype(bool).all())
+        fit_rows = len(pd.read_csv(output_dir / "gjb_fit_data.csv"))
+        self.assertEqual(len(mle), fit_rows)
+
+        refit = pd.read_csv(output_dir / "audit" / "tables" / "mle" / "step04_refit_data.csv")
+        refit_excluded_runouts = refit[
+            (~refit["gjb_is_failure"].astype(bool)) & (~refit["included_in_refit"].astype(bool))
+        ]
+        self.assertFalse(refit_excluded_runouts.empty)
+        excluded_refit_ids = set(refit_excluded_runouts["gjb_row_id"].astype(int))
+        mle_runout_ids = set(mle.loc[mle["likelihood_type"] == "logsf", "gjb_row_id"].astype(int))
+        self.assertTrue(excluded_refit_ids.issubset(mle_runout_ids))
 
     def test_weighted_step07_executes_and_unweighted_skips(self) -> None:
         weighted_in = self.tmpdir / "weighted_in"
@@ -222,12 +234,27 @@ class GJBAuditCliTests(unittest.TestCase):
     def _write_mle_dataset(path: Path) -> None:
         a1, a2, a4 = 0.8, -2.1, 0.0015
         response = np.array(
-            [0.014, 0.0125, 0.011, 0.0095, 0.008, 0.0068, 0.0058, 0.0048, 0.004, 0.0034, 0.0029, 0.0025]
+            [
+                0.014,
+                0.0125,
+                0.011,
+                0.0095,
+                0.008,
+                0.0068,
+                0.0058,
+                0.0048,
+                0.004,
+                0.0034,
+                0.0029,
+                0.0025,
+                0.0020,
+            ]
         )
         y = a1 + a2 * np.log10(response - a4)
         status = ["failure"] * len(response)
         status[4] = "runout"
         status[8] = "runout"
+        status[12] = "runout"
         pd.DataFrame({"strain": response, "life": np.round(10**y).astype(int), "status": status}).to_csv(
             path,
             index=False,

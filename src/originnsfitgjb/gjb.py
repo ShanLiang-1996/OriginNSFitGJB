@@ -507,14 +507,22 @@ def _fit_prepared_gjb18a(
             _decision_row(
                 int(final_state["iteration"]),
                 "Step09_FinalMLE",
-                "runout count > 0 ?",
-                active_runout_count,
-                "failures use logpdf; runout rows use logsf",
-                "runout contributes via logsf" if active_runout_count else "failure-only likelihood correction",
+                "all non-outlier rows included in final MLE ?",
+                {
+                    "active_rows_after_outlier_removal": len(active),
+                    "mle_input_rows": mle_state["mle_input_rows"],
+                    "runout_count": active_runout_count,
+                },
+                "final MLE uses every active row; failures use logpdf; runout rows use logsf",
+                (
+                    "all non-outlier rows included; runout contributes via logsf"
+                    if active_runout_count
+                    else "all non-outlier rows included; failure-only likelihood correction"
+                ),
                 (
                     "runout rows are right-censored and are not treated as ordinary failure points"
                     if active_runout_count
-                    else "no runout rows were available; MLE is based on failure likelihood terms"
+                    else "no runout rows were available; MLE is based on all active failure likelihood terms"
                 ),
                 "FinalMLE",
             )
@@ -618,6 +626,11 @@ def _fit_prepared_gjb18a(
             "success": bool(mle_state["success"]),
             "optimizer_message": mle_state["optimizer_message"],
             "runout_count": active_runout_count,
+            "active_rows_after_outlier_removal": int(len(active)),
+            "mle_input_rows": mle_state["mle_input_rows"],
+            "mle_failure_rows": mle_state["mle_failure_rows"],
+            "mle_runout_rows": mle_state["mle_runout_rows"],
+            "mle_domain_invalid_rows": mle_state["mle_domain_invalid_rows"],
         }
     else:
         step09_table = _gjb18a_final_mle_skipped_table(active, coefficient_c)
@@ -625,6 +638,8 @@ def _fit_prepared_gjb18a(
         step09_parameters_out = {
             "A4_fixed": coefficient_c,
             "runout_count": active_runout_count,
+            "active_rows_after_outlier_removal": int(len(active)),
+            "mle_input_rows": 0,
             "skipped_reason": str(final_state["stop_reason"]),
         }
     audit_steps["Step09_FinalMLE"] = _audit_step(
@@ -636,6 +651,7 @@ def _fit_prepared_gjb18a(
         formulas=(
             "failure rows use logpdf",
             "runout rows use logsf",
+            "all non-outlier rows participate in final MLE",
             "A4 and SD_i are fixed; only A1/A2 are corrected",
         ),
         parameters_in={"weighted": bool(variance.get("use_weighted", False))},
@@ -643,6 +659,9 @@ def _fit_prepared_gjb18a(
         decision={
             "runout_uses_logsf": active_runout_count > 0,
             "runout_not_plain_failure": True,
+            "all_non_outlier_rows_included": (
+                bool(mle_state["mle_input_rows"] == len(active)) if mle_state is not None else False
+            ),
         },
         warnings=(() if mle_state is not None else (str(final_state["stop_reason"]),)),
     )
@@ -1045,7 +1064,7 @@ def _gjb18a_iteration(
         ),
         weighted=bool(variance_model["use_weighted"]),
         variance_model=variance_model,
-        e_upper_source=float(refit_data["gjb_response"].min()),
+        e_upper_source=float(active["gjb_response"].min()),
     )
     refit_table = _gjb18a_refit_result_table(refit_data, refit, variance_model, iteration)
     audit_steps["Step05_RefitResult"] = _audit_step(
@@ -1868,8 +1887,9 @@ def _gjb18a_final_mle(
 ) -> dict[str, object]:
     """Apply the final right-censored likelihood correction.
 
-    GJB/Z 18A 9.3.2.7.2 fixes A4 and SD_i and corrects only A1/A2.  Failure
-    rows contribute normal ``logpdf`` terms; run-out rows contribute survival
+    GJB/Z 18A 9.3.2.7.2 fixes A4 and SD_i and corrects only A1/A2.  Every
+    non-outlier active row participates in the likelihood.  Failure rows
+    contribute normal ``logpdf`` terms; run-out rows contribute survival
     ``logsf`` terms and are not converted to ordinary failure points.
     """
     c = float(fit["coefficient_c"])
@@ -1877,20 +1897,23 @@ def _gjb18a_final_mle(
     y = active["gjb_y_log10_life"].to_numpy(dtype=float)
     failures = active["gjb_is_failure"].astype(bool).to_numpy()
     domain = response > c
-    response_fit = response[domain]
-    y_fit = y[domain]
-    failures_fit = failures[domain]
-    if len(y_fit) < 3:
-        raise ValueError("gjb18a-strain final MLE has fewer than three domain-valid rows.")
-    x = _gjb18a_x(response_fit, c)
-    h_values = _gjb18a_h_values(response_fit, variance_model)
+    if not np.all(domain):
+        invalid_ids = active.loc[~domain, "gjb_row_id"].astype(int).tolist()
+        raise ValueError(
+            "gjb18a-strain final MLE requires every non-outlier row to satisfy "
+            f"response > A4; invalid row id(s): {invalid_ids}."
+        )
+    if len(y) < 3:
+        raise ValueError("gjb18a-strain final MLE has fewer than three non-outlier rows.")
+    x = _gjb18a_x(response, c)
+    h_values = _gjb18a_h_values(response, variance_model)
     sd_i = float(fit["rmse"]) * h_values
     initial_b = min(float(fit["coefficient_b"]), -1e-8)
     initial = np.array([float(fit["coefficient_a"]), np.log(max(-initial_b, 1e-8))])
     result = optimize.minimize(
         _gjb18a_final_mle_negative_log_likelihood,
         initial,
-        args=(x, y_fit, failures_fit, sd_i),
+        args=(x, y, failures, sd_i),
         method="L-BFGS-B",
         bounds=[(None, None), (-50.0, 50.0)],
     )
@@ -1901,8 +1924,8 @@ def _gjb18a_final_mle(
         lambda params: _gjb18a_final_mle_negative_log_likelihood(
             params,
             x,
-            y_fit,
-            failures_fit,
+            y,
+            failures,
             sd_i,
         ),
         result.x,
@@ -1912,17 +1935,18 @@ def _gjb18a_final_mle(
     covariance_original = jacobian_original @ covariance_transformed @ jacobian_original.T
     standard_errors = np.sqrt(np.maximum(np.diag(covariance_original), 0.0))
     mu = a + b * x
-    likelihood = active[domain].copy().reset_index(drop=True)
+    likelihood = active.copy().reset_index(drop=True)
     likelihood["domain_valid"] = True
+    likelihood["included_in_final_mle"] = True
     likelihood["x"] = x
     likelihood["sd_i"] = sd_i
     likelihood["mu"] = mu
-    likelihood["w"] = (y_fit - mu) / sd_i
+    likelihood["w"] = (y - mu) / sd_i
     likelihood["logpdf"] = stats.norm.logpdf(likelihood["w"]) - np.log(sd_i)
     likelihood["logsf"] = stats.norm.logsf(likelihood["w"])
-    likelihood["likelihood_type"] = np.where(failures_fit, "logpdf", "logsf")
+    likelihood["likelihood_type"] = np.where(failures, "logpdf", "logsf")
     likelihood["log_likelihood_i"] = np.where(
-        failures_fit,
+        failures,
         likelihood["logpdf"],
         likelihood["logsf"],
     )
@@ -1933,25 +1957,6 @@ def _gjb18a_final_mle(
     likelihood["gjb18a_logpdf"] = likelihood["logpdf"]
     likelihood["gjb18a_logsf"] = likelihood["logsf"]
     likelihood["gjb18a_log_likelihood_i"] = likelihood["log_likelihood_i"]
-    if np.any(~domain):
-        excluded = active[~domain].copy()
-        excluded["domain_valid"] = False
-        excluded["x"] = np.nan
-        excluded["sd_i"] = np.nan
-        excluded["mu"] = np.nan
-        excluded["w"] = np.nan
-        excluded["logpdf"] = np.nan
-        excluded["logsf"] = np.nan
-        excluded["likelihood_type"] = "excluded_domain"
-        excluded["log_likelihood_i"] = np.nan
-        excluded["gjb18a_x"] = np.nan
-        excluded["gjb18a_sd_i"] = np.nan
-        excluded["gjb18a_mu"] = np.nan
-        excluded["gjb18a_w"] = np.nan
-        excluded["gjb18a_logpdf"] = np.nan
-        excluded["gjb18a_logsf"] = np.nan
-        excluded["gjb18a_log_likelihood_i"] = np.nan
-        likelihood = pd.concat([likelihood, excluded], ignore_index=True)
     return {
         "coefficient_a": a,
         "coefficient_b": b,
@@ -1963,6 +1968,10 @@ def _gjb18a_final_mle(
         "success": bool(result.success and np.isfinite(nll)),
         "optimizer_message": str(result.message),
         "likelihood": likelihood,
+        "mle_input_rows": int(len(active)),
+        "mle_failure_rows": int(np.sum(failures)),
+        "mle_runout_rows": int(np.sum(~failures)),
+        "mle_domain_invalid_rows": 0,
     }
 
 
@@ -1976,6 +1985,7 @@ def _gjb18a_final_mle_audit_table(likelihood: pd.DataFrame) -> pd.DataFrame:
         "gjb_life",
         "gjb_y_log10_life",
         "domain_valid",
+        "included_in_final_mle",
         "x",
         "sd_i",
         "mu",
@@ -2005,6 +2015,7 @@ def _gjb18a_final_mle_skipped_table(active: pd.DataFrame, coefficient_c: float) 
         ]
     ].copy()
     table["domain_valid"] = table["gjb_response"].astype(float) > coefficient_c
+    table["included_in_final_mle"] = False
     table["x"] = np.nan
     table["sd_i"] = np.nan
     table["mu"] = np.nan
