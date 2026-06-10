@@ -7,6 +7,7 @@ import traceback
 
 import pandas as pd
 
+from .audit import AuditRecord, write_audit_outputs
 from .data_loader import discover_files, read_table, strain_life_columns
 from .gjb import GJBFit, fit_gjb18a
 from .origin_client import OriginAutomationError, OriginClient, OriginGJBJob
@@ -52,6 +53,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fit-points", type=int, default=300, help="Number of curve points.")
     parser.add_argument("--symbol-kind", type=int, default=2, help="Origin symbol kind for data points.")
     parser.add_argument("--dry-run", action="store_true", help="Skip Origin automation.")
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Write complete CSV, JSON and Excel audit outputs under --audit-dir.",
+    )
+    parser.add_argument(
+        "--audit-workbook",
+        action="store_true",
+        help="Write output/audit/gjb_audit_workbook.xlsx for manual review.",
+    )
+    parser.add_argument(
+        "--audit-json",
+        action="store_true",
+        help="Write per-step JSON metadata and decision records.",
+    )
+    parser.add_argument(
+        "--outlier-mode",
+        choices=("auto", "report-only"),
+        default="auto",
+        help="auto removes documented outliers; report-only records candidates without deleting rows.",
+    )
+    parser.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=None,
+        help="Audit output directory. Defaults to OUTPUT/audit.",
+    )
     parser.add_argument("--hidden-origin", action="store_true", help="Do not show Origin UI.")
     parser.add_argument(
         "--project",
@@ -107,6 +135,7 @@ def run_gjb_analysis(args: argparse.Namespace) -> int:
     level_frames: list[pd.DataFrame] = []
     extra_table_frames: dict[str, list[pd.DataFrame]] = {}
     origin_jobs: list[OriginGJBJob] = []
+    audit_records: list[AuditRecord] = []
 
     # Step 2 - Read every table and run the GJB/Z 18A fitting workflow.
     for path in files:
@@ -117,6 +146,7 @@ def run_gjb_analysis(args: argparse.Namespace) -> int:
                     args.life,
                     args.response,
                 )
+                label = _safe_name(table.label)
                 fit = fit_gjb18a(
                     table.frame,
                     life_column,
@@ -126,12 +156,16 @@ def run_gjb_analysis(args: argparse.Namespace) -> int:
                     status_column=args.status,
                     level_column=args.level,
                     replicate_decimals=args.replicate_decimals,
+                    outlier_mode=args.outlier_mode,
+                    source_file=str(path),
+                    source_sheet=table.sheet or "",
+                    source_group=table.group or "",
+                    source_label=label,
                 )
             except Exception as exc:
                 print(f"GJB analysis failed for {table.label}: {exc}")
                 continue
 
-            label = _safe_name(table.label)
             title = str(table.group or table.sheet or path.stem)
             summaries.append(
                 _gjb_summary_record(
@@ -157,6 +191,15 @@ def run_gjb_analysis(args: argparse.Namespace) -> int:
                         _with_metadata(frame, path, table.sheet, table.group, label)
                     )
             origin_jobs.append(OriginGJBJob(fit=fit, label=label, title=title))
+            audit_records.append(
+                AuditRecord(
+                    label=label,
+                    file=str(path),
+                    sheet=table.sheet or "",
+                    group=table.group or "",
+                    fit=fit,
+                )
+            )
 
     if not summaries:
         print("No GJB analyses were completed.")
@@ -174,7 +217,20 @@ def run_gjb_analysis(args: argparse.Namespace) -> int:
         output_dir,
     )
 
-    # Step 4 - Optionally create an Origin project and exported figures.
+    # Step 4 - Write Python-side audit outputs before attempting Origin automation.
+    audit_enabled = bool(args.audit or args.audit_workbook or args.audit_json)
+    if audit_enabled:
+        audit_dir = args.audit_dir or (output_dir / "audit")
+        audit_paths = write_audit_outputs(
+            audit_records,
+            summary_frame,
+            audit_dir,
+            write_json=bool(args.audit or args.audit_json),
+            write_workbook=bool(args.audit or args.audit_workbook),
+        )
+        output_paths.extend(audit_paths)
+
+    # Step 5 - Optionally create an Origin project and exported figures.
     if not args.dry_run:
         project_path = args.project or (output_dir / "gjb_analysis.opj")
         origin = None
@@ -205,7 +261,7 @@ def run_gjb_analysis(args: argparse.Namespace) -> int:
             if origin is not None:
                 origin.__exit__(None, None, None)
 
-    # Step 5 - Report every file produced by the CSV stage.
+    # Step 6 - Report every file produced by the CSV and audit stages.
     for output_path in output_paths:
         if output_path.exists():
             print(f"Wrote {output_path}")

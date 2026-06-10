@@ -100,6 +100,23 @@ class GJBFitResult:
 
 
 @dataclass(frozen=True)
+class GJBAuditStep:
+    """Structured audit record for one GJB/Z 18A 9.3.2 workflow step."""
+
+    step_id: str
+    step_name: str
+    status: str
+    input_columns: tuple[str, ...]
+    output_columns: tuple[str, ...]
+    formulas: tuple[str, ...]
+    parameters_in: dict[str, object]
+    parameters_out: dict[str, object]
+    decision: dict[str, object]
+    warnings: tuple[str, ...]
+    table: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
 class GJBFit:
     result: GJBFitResult
     data: pd.DataFrame
@@ -107,6 +124,8 @@ class GJBFit:
     level_stats: pd.DataFrame
     runout_data: pd.DataFrame | None = None
     extra_tables: dict[str, pd.DataFrame] | None = None
+    audit_steps: dict[str, GJBAuditStep] | None = None
+    decision_log: pd.DataFrame | None = None
 
 
 def fit_gjb18a(
@@ -119,11 +138,26 @@ def fit_gjb18a(
     status_column: str | None = None,
     level_column: str | None = None,
     replicate_decimals: int = 8,
+    outlier_mode: str = "auto",
+    source_file: str | None = None,
+    source_sheet: str | None = None,
+    source_group: str | None = None,
+    source_label: str | None = None,
 ) -> GJBFit:
-    """Fit the simplified GJB/Z 18A 9.3.2 strain-life workflow."""
+    """Fit the simplified GJB/Z 18A 9.3.2 strain-life workflow.
+
+    The simplified Formula 136 model is
+    ``log10(Nf) = A1 + A2 * log10(response - A4)``.  The input response column
+    is used directly as equivalent strain; A3 is not fitted.  ``outlier_mode``
+    controls whether the documented outlier candidate is removed automatically
+    (``auto``) or only reported for manual review (``report-only``).
+    """
     confidence = _normalize_confidence(confidence)
     if fit_points < 2:
         raise ValueError("fit_points must be at least 2.")
+    outlier_mode = str(outlier_mode).strip().lower()
+    if outlier_mode not in {"auto", "report-only"}:
+        raise ValueError("outlier_mode must be 'auto' or 'report-only'.")
 
     # Step 1 - Validate the user-selected source columns before any numeric conversion.
     _require_column(frame, life_column, "life")
@@ -159,6 +193,13 @@ def fit_gjb18a(
         level_column=level_column,
         replicate_decimals=replicate_decimals,
         warnings=warnings,
+        source_file=source_file,
+        source_sheet=source_sheet,
+        source_group=source_group,
+        source_label=source_label,
+        original_row_count=initial_rows,
+        dropped_missing_rows=dropped_missing,
+        outlier_mode=outlier_mode,
     )
 
 
@@ -175,6 +216,118 @@ def _require_column(frame: pd.DataFrame, column: str, role: str) -> None:
     if column not in frame.columns:
         raise ValueError(f"GJB {role} column not found: {column}")
 
+
+def _audit_step(
+    step_id: str,
+    step_name: str,
+    status: str,
+    table: pd.DataFrame | None,
+    *,
+    input_columns: tuple[str, ...],
+    formulas: tuple[str, ...],
+    parameters_in: dict[str, object] | None = None,
+    parameters_out: dict[str, object] | None = None,
+    decision: dict[str, object] | None = None,
+    warnings: tuple[str, ...] = (),
+) -> GJBAuditStep:
+    """Create a structured audit record with table column metadata."""
+    return GJBAuditStep(
+        step_id=step_id,
+        step_name=step_name,
+        status=status,
+        input_columns=input_columns,
+        output_columns=tuple(table.columns) if table is not None else (),
+        formulas=formulas,
+        parameters_in=parameters_in or {},
+        parameters_out=parameters_out or {},
+        decision=decision or {},
+        warnings=warnings,
+        table=table,
+    )
+
+
+def _combine_audit_steps(step_id: str, steps: list[GJBAuditStep]) -> GJBAuditStep:
+    """Combine multiple iteration audit records into one step table."""
+    if not steps:
+        raise ValueError(f"No audit steps to combine for {step_id}.")
+    first = steps[0]
+    frames = [step.table for step in steps if step.table is not None]
+    table = pd.concat(frames, ignore_index=True) if frames else None
+    statuses = {step.status for step in steps}
+    if "failed" in statuses:
+        status = "failed"
+    elif "warning" in statuses:
+        status = "warning"
+    elif "candidate" in statuses:
+        status = "candidate"
+    elif all(step.status == "skipped" for step in steps):
+        status = "skipped"
+    else:
+        status = "completed"
+    return GJBAuditStep(
+        step_id=step_id,
+        step_name=first.step_name,
+        status=status,
+        input_columns=first.input_columns,
+        output_columns=tuple(table.columns) if table is not None else first.output_columns,
+        formulas=first.formulas,
+        parameters_in={"iterations": [step.parameters_in for step in steps]},
+        parameters_out={"iterations": [step.parameters_out for step in steps]},
+        decision={"iterations": [step.decision for step in steps]},
+        warnings=tuple(warning for step in steps for warning in step.warnings),
+        table=table,
+    )
+
+
+def _decision_row(
+    iteration: int,
+    step_id: str,
+    question: str,
+    value: object,
+    rule: str,
+    decision: str,
+    reason: str,
+    source_table: str,
+) -> dict[str, object]:
+    """Create one process decision log row."""
+    return {
+        "iteration": iteration,
+        "step_id": step_id,
+        "question": question,
+        "value": value,
+        "rule": rule,
+        "decision": decision,
+        "reason": reason,
+        "source_table": source_table,
+    }
+
+
+def _gjb18a_input_checked_table(
+    prepared: pd.DataFrame,
+    life_column: str,
+    response_column: str,
+    status_column: str | None,
+) -> pd.DataFrame:
+    """Return Step00 input validation rows for Excel/CSV review."""
+    columns = ["gjb_row_id"]
+    for column in (life_column, response_column, status_column):
+        if column and column not in columns:
+            columns.append(column)
+    columns.extend(
+        [
+            "gjb_life",
+            "gjb_response",
+            "gjb_y_log10_life",
+            "gjb_is_failure",
+            "gjb_original_status",
+            "included_in_failure_fit",
+            "included_in_runout_mle",
+            "positive_domain_check",
+            "validation_message",
+        ]
+    )
+    return prepared[columns].copy()
+
 def _fit_prepared_gjb18a(
     data: pd.DataFrame,
     life_column: str,
@@ -186,6 +339,13 @@ def _fit_prepared_gjb18a(
     level_column: str | None,
     replicate_decimals: int,
     warnings: list[str],
+    source_file: str | None,
+    source_sheet: str | None,
+    source_group: str | None,
+    source_label: str | None,
+    original_row_count: int,
+    dropped_missing_rows: int,
+    outlier_mode: str,
 ) -> GJBFit:
     """Fit prepared rows with the simplified GJB/Z 18A 9.3.2 Formula 136 model.
 
@@ -195,27 +355,86 @@ def _fit_prepared_gjb18a(
 
         log10(Nf) = A1 + A2 * log10(strain - A4)
     """
-    # Step 1 - Keep only rows inside the positive life/response domain required by Formula 136.
-    prepared = data.copy().reset_index(drop=True)
-    prepared["gjb_row_id"] = np.arange(len(prepared), dtype=int)
-    before_domain_rows = len(prepared)
-    positive_mask = (prepared["gjb_life"] > 0) & (prepared["gjb_response"] > 0)
-    prepared = prepared[positive_mask].copy().reset_index(drop=True)
-    dropped_nonpositive = before_domain_rows - len(prepared)
+    audit_steps: dict[str, GJBAuditStep] = {}
+    iteration_audit_steps: dict[str, list[GJBAuditStep]] = {}
+    decision_rows: list[dict[str, object]] = []
+
+    # Step 1 - Keep all numeric rows long enough to audit domain checks.
+    prepared_all = data.copy().reset_index(drop=True)
+    prepared_all["gjb_row_id"] = np.arange(len(prepared_all), dtype=int)
+    before_domain_rows = len(prepared_all)
+    positive_mask = (prepared_all["gjb_life"] > 0) & (prepared_all["gjb_response"] > 0)
+    dropped_nonpositive = before_domain_rows - int(np.sum(positive_mask))
     if dropped_nonpositive:
         warnings.append(
             f"Dropped {dropped_nonpositive} row(s) outside the positive domain required by gjb18a-strain."
         )
-    if prepared.empty:
-        raise ValueError("No positive life/strain rows are available for gjb18a-strain.")
-
     # Step 2 - Normalize failure/run-out status and compute the log-life response.
     if status_column:
-        prepared["gjb_is_failure"] = prepared[status_column].map(_status_is_failure).astype(bool)
+        prepared_all["gjb_is_failure"] = prepared_all[status_column].map(_status_is_failure).astype(bool)
     else:
-        prepared["gjb_is_failure"] = True
-    prepared["gjb_y_log10_life"] = np.log10(prepared["gjb_life"].to_numpy(dtype=float))
-    prepared["gjb_original_status"] = np.where(prepared["gjb_is_failure"], "failure", "runout")
+        prepared_all["gjb_is_failure"] = True
+    prepared_all["gjb_y_log10_life"] = np.where(
+        prepared_all["gjb_life"].to_numpy(dtype=float) > 0.0,
+        np.log10(np.maximum(prepared_all["gjb_life"].to_numpy(dtype=float), 1e-300)),
+        np.nan,
+    )
+    prepared_all["gjb_original_status"] = np.where(
+        prepared_all["gjb_is_failure"],
+        "failure",
+        "runout",
+    )
+    prepared_all["positive_domain_check"] = positive_mask
+    prepared_all["included_in_failure_fit"] = positive_mask & prepared_all["gjb_is_failure"].astype(bool)
+    prepared_all["included_in_runout_mle"] = positive_mask & ~prepared_all["gjb_is_failure"].astype(bool)
+    prepared_all["validation_message"] = np.where(
+        positive_mask,
+        "ok",
+        "excluded: gjb_life and gjb_response must both be positive",
+    )
+    step00_table = _gjb18a_input_checked_table(
+        prepared_all,
+        life_column,
+        response_column,
+        status_column,
+    )
+    prepared = prepared_all[positive_mask].copy().reset_index(drop=True)
+    step00_warnings = []
+    if dropped_missing_rows:
+        step00_warnings.append(f"{dropped_missing_rows} row(s) were removed before numeric fitting because life/response was missing.")
+    if dropped_nonpositive:
+        step00_warnings.append(f"{dropped_nonpositive} row(s) failed the positive domain check.")
+    audit_steps["Step00_InputChecked"] = _audit_step(
+        "Step00_InputChecked",
+        "Input checked",
+        "completed",
+        step00_table,
+        input_columns=tuple(column for column in (life_column, response_column, status_column) if column),
+        formulas=("gjb_y_log10_life = log10(gjb_life)",),
+        parameters_in={
+            "input_file": source_file or "",
+            "sheet": source_sheet or "",
+            "group": source_group or "",
+            "label": source_label or "",
+            "life_column": life_column,
+            "response_column": response_column,
+            "status_column": status_column or "",
+        },
+        parameters_out={
+            "original_rows": int(original_row_count),
+            "dropped_missing_rows": int(dropped_missing_rows),
+            "dropped_nonpositive_rows": int(dropped_nonpositive),
+            "failure_count": int((prepared_all["positive_domain_check"] & prepared_all["gjb_is_failure"]).sum()),
+            "runout_count": int((prepared_all["positive_domain_check"] & ~prepared_all["gjb_is_failure"]).sum()),
+        },
+        decision={
+            "positive_domain_rule": "gjb_life > 0 and gjb_response > 0",
+            "status_rule": "known runout/suspended/censored markers are treated as runout; otherwise failure",
+        },
+        warnings=tuple(step00_warnings),
+    )
+    if prepared.empty:
+        raise ValueError("No positive life/strain rows are available for gjb18a-strain.")
 
     original_failure = prepared[prepared["gjb_is_failure"]].copy()
     if len(original_failure) < 4:
@@ -239,8 +458,12 @@ def _fit_prepared_gjb18a(
             e_min_failure=e_min_failure,
             confidence=confidence,
             iteration=iteration,
+            outlier_mode=outlier_mode,
         )
         iteration_records.extend(state["tables"])
+        for step_id, step in state["audit_steps"].items():
+            iteration_audit_steps.setdefault(step_id, []).append(step)
+        decision_rows.extend(state["decision_rows"])
         outlier_table = state["outlier_table"]
         outlier_records.append(outlier_table)
         final_state = state
@@ -278,6 +501,37 @@ def _fit_prepared_gjb18a(
         )
         if not bool(mle_state["success"]):
             warnings.append(f"gjb18a-strain final MLE warning: {mle_state['optimizer_message']}")
+    active_runout_count = int((~active["gjb_is_failure"].astype(bool)).sum())
+    if mle_state is not None:
+        decision_rows.append(
+            _decision_row(
+                int(final_state["iteration"]),
+                "Step09_FinalMLE",
+                "runout count > 0 ?",
+                active_runout_count,
+                "failures use logpdf; runout rows use logsf",
+                "runout contributes via logsf" if active_runout_count else "failure-only likelihood correction",
+                (
+                    "runout rows are right-censored and are not treated as ordinary failure points"
+                    if active_runout_count
+                    else "no runout rows were available; MLE is based on failure likelihood terms"
+                ),
+                "FinalMLE",
+            )
+        )
+    else:
+        decision_rows.append(
+            _decision_row(
+                int(final_state["iteration"]),
+                "Step09_FinalMLE",
+                "parameter significance passed ?",
+                significance_passed,
+                "MLE runs only after parameter significance passes",
+                "final MLE skipped",
+                str(final_state["stop_reason"]),
+                "FinalMLE",
+            )
+        )
 
     coefficient_a = float(mle_state["coefficient_a"] if mle_state else refit["coefficient_a"])
     coefficient_b = float(mle_state["coefficient_b"] if mle_state else refit["coefficient_b"])
@@ -351,7 +605,122 @@ def _fit_prepared_gjb18a(
     sxx = float(np.nansum(x_delta**2))
     sxy = float(np.nansum(x_delta * y_delta))
 
-    # Step 11 - Collect step-by-step review tables for CSV and Origin workbooks.
+    # Step 11 - Add final document-style audit steps that do not replace legacy summary fields.
+    if mle_state is not None:
+        step09_table = _gjb18a_final_mle_audit_table(mle_state["likelihood"])
+        step09_status = "completed" if bool(mle_state["success"]) else "warning"
+        step09_parameters_out = {
+            "A1_mle": mle_state["coefficient_a"],
+            "A2_mle": mle_state["coefficient_b"],
+            "A4_fixed": coefficient_c,
+            "log_likelihood": mle_state["log_likelihood"],
+            "negative_log_likelihood": mle_state["negative_log_likelihood"],
+            "success": bool(mle_state["success"]),
+            "optimizer_message": mle_state["optimizer_message"],
+            "runout_count": active_runout_count,
+        }
+    else:
+        step09_table = _gjb18a_final_mle_skipped_table(active, coefficient_c)
+        step09_status = "skipped"
+        step09_parameters_out = {
+            "A4_fixed": coefficient_c,
+            "runout_count": active_runout_count,
+            "skipped_reason": str(final_state["stop_reason"]),
+        }
+    audit_steps["Step09_FinalMLE"] = _audit_step(
+        "Step09_FinalMLE",
+        "Final MLE",
+        step09_status,
+        step09_table,
+        input_columns=("gjb_response", "gjb_life", "gjb_is_failure"),
+        formulas=(
+            "failure rows use logpdf",
+            "runout rows use logsf",
+            "A4 and SD_i are fixed; only A1/A2 are corrected",
+        ),
+        parameters_in={"weighted": bool(variance.get("use_weighted", False))},
+        parameters_out=step09_parameters_out,
+        decision={
+            "runout_uses_logsf": active_runout_count > 0,
+            "runout_not_plain_failure": True,
+        },
+        warnings=(() if mle_state is not None else (str(final_state["stop_reason"]),)),
+    )
+
+    final_residual_statistics = _gjb18a_final_residual_statistics(
+        fit_sample,
+        coefficient_a,
+        coefficient_b,
+        coefficient_c,
+        variance,
+    )
+    audit_steps["Step10_FinalResidualStatistics"] = _audit_step(
+        "Step10_FinalResidualStatistics",
+        "Final residual statistics",
+        "completed",
+        final_residual_statistics,
+        input_columns=("gjb_y_log10_life", "gjb_response"),
+        formulas=(
+            "unweighted RMSE = sqrt(sum(R_i^2)/(n-k))",
+            "weighted WR_i = R_i/h_i; RMSE = sqrt(sum(WR_i^2)/(n-k)); SD_i = RMSE*h_i",
+        ),
+        parameters_in={"k": 3},
+        parameters_out={
+            "RMSE": float(final_residual_statistics["RMSE"].iloc[0]),
+            "weighted": bool(final_residual_statistics["weighted"].iloc[0]),
+            "df": int(final_residual_statistics["df"].iloc[0]),
+        },
+        decision={"legacy_r2_unchanged": True},
+        warnings=(),
+    )
+    model_assessment = _gjb18a_model_assessment(final_residual_statistics)
+    audit_steps["Step11_ModelAssessment"] = _audit_step(
+        "Step11_ModelAssessment",
+        "Model assessment",
+        "completed",
+        model_assessment,
+        input_columns=("standardized_residual", "gjb_response"),
+        formulas=(
+            "D = sum((SR_i - SR_{i-1})^2) / sum(SR_i^2)",
+            "Dcrit = 2 - 4.73 / n^0.555",
+        ),
+        parameters_in={"sort_by": "gjb_response"},
+        parameters_out={
+            "D": float(model_assessment["D"].iloc[0]) if len(model_assessment) else np.nan,
+            "Dcrit": float(model_assessment["Dcrit"].iloc[0]) if len(model_assessment) else np.nan,
+            "D_lt_Dcrit": bool(model_assessment["D_lt_Dcrit"].iloc[0]) if len(model_assessment) else False,
+            "multi_strain_ratio_residual_mean_check": "not applicable",
+        },
+        decision={
+            "possible_misfit": bool(model_assessment["possible_misfit"].iloc[0]) if len(model_assessment) else False,
+            "reason": "single response is used directly as equivalent strain; multi-ratio residual mean check is not applicable",
+        },
+        warnings=(),
+    )
+    r2_document_style = _gjb18a_document_style_r2(final_residual_statistics, float(r2))
+    audit_steps["Step12_R2_DocumentStyle"] = _audit_step(
+        "Step12_R2_DocumentStyle",
+        "Document-style R2",
+        "completed",
+        r2_document_style,
+        input_columns=("y", "h", "RMSE"),
+        formulas=("R2 = 1 - RMSE^2 / RTE^2",),
+        parameters_in={"old_r2_log_life": float(r2)},
+        parameters_out={
+            "r2_document_style": float(r2_document_style["r2_document_style"].iloc[0]),
+            "weighted": bool(r2_document_style["weighted"].iloc[0]),
+            "RMSE": float(r2_document_style["RMSE"].iloc[0]),
+            "RTE": float(r2_document_style["RTE"].iloc[0]),
+        },
+        decision={"old_r2_log_life_preserved": True},
+        warnings=(),
+    )
+
+    for step_id, steps in iteration_audit_steps.items():
+        audit_steps[step_id] = _combine_audit_steps(step_id, steps)
+    decision_log = pd.DataFrame(decision_rows)
+
+    # Step 12 - Collect step-by-step review tables for CSV and Origin workbooks.
     extra_tables = _gjb18a_extra_tables(
         iteration_records,
         outlier_records,
@@ -359,6 +728,11 @@ def _fit_prepared_gjb18a(
         removed,
         mle_state,
         final_state,
+        decision_log,
+        final_residual_statistics,
+        model_assessment,
+        r2_document_style,
+        step09_table,
     )
 
     if not significance_passed:
@@ -463,6 +837,8 @@ def _fit_prepared_gjb18a(
         level_stats=level_stats,
         runout_data=runout_data,
         extra_tables=extra_tables,
+        audit_steps=audit_steps,
+        decision_log=decision_log,
     )
 
 
@@ -472,7 +848,12 @@ def _gjb18a_iteration(
     e_min_failure: float,
     confidence: float,
     iteration: int,
+    outlier_mode: str,
 ) -> dict[str, object]:
+    """Run one auditable GJB/Z 18A 9.3.2 refit/outlier iteration."""
+    audit_steps: dict[str, GJBAuditStep] = {}
+    decision_rows: list[dict[str, object]] = []
+
     # Step 1 - Work with failure rows for initialization and parameter significance checks.
     failures = active[active["gjb_is_failure"].astype(bool)].copy().reset_index(drop=True)
     if len(failures) < 4:
@@ -482,19 +863,65 @@ def _gjb18a_iteration(
     a4_initial = 0.5 * e_min_failure
     x_initial = _gjb18a_x(failures["gjb_response"].to_numpy(dtype=float), a4_initial)
     y_failure = failures["gjb_y_log10_life"].to_numpy(dtype=float)
-    a1_initial, a2_initial, initial_cov = _weighted_linear_fit(x_initial, y_failure)
+    raw_a1_initial, raw_a2_initial, initial_cov = _weighted_linear_fit(x_initial, y_failure)
+    a1_initial = raw_a1_initial
+    a2_initial = raw_a2_initial
+    forced_negative_slope = a2_initial >= 0.0
     if a2_initial >= 0.0:
         a2_initial = -1.0 if a2_initial == 0.0 else -abs(a2_initial)
-    initial_ols = pd.DataFrame(
-        [
-            {
-                "iteration": iteration,
-                "A1_initial": a1_initial,
-                "A2_initial": a2_initial,
-                "A4_initial": a4_initial,
-                "failure_points": len(failures),
-            }
-        ]
+    y_pred_initial = a1_initial + a2_initial * x_initial
+    residual_initial = y_failure - y_pred_initial
+    initial_ols = failures[["gjb_row_id", "gjb_response", "gjb_y_log10_life"]].copy()
+    initial_ols.insert(0, "iteration", iteration)
+    initial_ols = initial_ols.rename(
+        columns={
+            "gjb_response": "x_response",
+            "gjb_y_log10_life": "y_log10_life",
+        }
+    )
+    initial_ols["min_failure_response"] = e_min_failure
+    initial_ols["A1_initial"] = a1_initial
+    initial_ols["A2_initial"] = a2_initial
+    initial_ols["A4_initial"] = a4_initial
+    initial_ols["x_minus_A4_initial"] = initial_ols["x_response"].astype(float) - a4_initial
+    initial_ols["X_initial_log10"] = x_initial
+    initial_ols["y_pred_initial_ols"] = y_pred_initial
+    initial_ols["residual_initial_ols"] = residual_initial
+    initial_ols["residual_squared_initial_ols"] = residual_initial**2
+    audit_steps["Step01_InitialOLS"] = _audit_step(
+        "Step01_InitialOLS",
+        "Initial OLS",
+        "completed",
+        initial_ols,
+        input_columns=("gjb_response", "gjb_y_log10_life"),
+        formulas=(
+            "A4_initial = 0.5 * min(failure response)",
+            "X_initial = log10(response - A4_initial)",
+            "y = A1 + A2 * X_initial",
+        ),
+        parameters_in={"iteration": iteration, "min_failure_response": e_min_failure},
+        parameters_out={
+            "A1_initial": a1_initial,
+            "A2_initial": a2_initial,
+            "A4_initial": a4_initial,
+            "OLS_SSE": float(np.sum(residual_initial**2)),
+            "OLS_covariance": initial_cov,
+            "forced_negative_slope": forced_negative_slope,
+            "raw_A2_initial": raw_a2_initial,
+        },
+        decision={
+            "forced_negative_slope": forced_negative_slope,
+            "reason": (
+                "raw OLS slope was non-negative and was forced negative"
+                if forced_negative_slope
+                else "raw OLS slope was already negative"
+            ),
+        },
+        warnings=(
+            ("A2_initial was forced negative because the fatigue-life slope must be negative.",)
+            if forced_negative_slope
+            else ()
+        ),
     )
 
     # Step 3 - Run the initial nonlinear fit on failure data.
@@ -505,7 +932,43 @@ def _gjb18a_iteration(
         variance_model=None,
         e_upper_source=e_min_failure,
     )
-    initial_nls_table = _gjb18a_fit_table(initial_nls, iteration, "InitialNLS")
+    initial_nls_table = _gjb18a_nls_audit_table(
+        failures,
+        initial_nls,
+        iteration,
+        "initial_nls",
+    )
+    audit_steps["Step02_InitialNLS"] = _audit_step(
+        "Step02_InitialNLS",
+        "Initial nonlinear least squares",
+        "completed" if bool(initial_nls["success"]) else "warning",
+        initial_nls_table,
+        input_columns=("gjb_response", "gjb_y_log10_life"),
+        formulas=("y_pred = A1 + A2 * log10(response - A4)", "SSE = sum(residual^2)"),
+        parameters_in={
+            "initial_parameters": initial_nls["initial_parameters"],
+            "lower_bounds": initial_nls["lower_bounds"],
+            "upper_bounds": initial_nls["upper_bounds"],
+            "A4_lower_bound": initial_nls["lower_bounds"][2],
+            "A4_upper_bound": initial_nls["upper_bounds"][2],
+        },
+        parameters_out={
+            "A1_initial_nls": initial_nls["coefficient_a"],
+            "A2_initial_nls": initial_nls["coefficient_b"],
+            "A4_initial_nls": initial_nls["coefficient_c"],
+            "converged": bool(initial_nls["success"]),
+            "optimizer_message": initial_nls["optimizer_message"],
+            "NLS_SSE": initial_nls["objective"],
+            "covariance": initial_nls["covariance"],
+            "standard_errors": [
+                initial_nls["standard_error_a"],
+                initial_nls["standard_error_b"],
+                initial_nls["standard_error_c"],
+            ],
+        },
+        decision={"converged": bool(initial_nls["success"])},
+        warnings=(() if bool(initial_nls["success"]) else (str(initial_nls["optimizer_message"]),)),
+    )
 
     # Step 4 - Estimate the residual variance model and decide whether weighting is needed.
     variance_model, variance_table = _gjb18a_variance_model(
@@ -514,8 +977,62 @@ def _gjb18a_iteration(
         confidence,
         iteration,
     )
+    use_weighted = bool(variance_model["use_weighted"])
+    audit_steps["Step03_VarianceAnalysis"] = _audit_step(
+        "Step03_VarianceAnalysis",
+        "Variance analysis",
+        "completed",
+        variance_table,
+        input_columns=("gjb_response", "initial_residual"),
+        formulas=(
+            "scaled_abs_residual = abs(initial_residual) / sqrt(2/pi)",
+            "h = sigma0 + sigma1 / response",
+            "weight = 1 / h^2",
+        ),
+        parameters_in={"confidence": confidence, "iteration": iteration},
+        parameters_out=variance_model,
+        decision={
+            "rule": "use weighted refit when sigma1_lower_90 > 0 and sigma1 > 0",
+            "use_weighted": use_weighted,
+        },
+        warnings=tuple(variance_model.get("warnings", ())),
+    )
+    decision_rows.append(
+        _decision_row(
+            iteration,
+            "Step03_VarianceAnalysis",
+            "sigma1 90% CI lower > 0 ?",
+            variance_model["sigma1_lower_90"],
+            "sigma1_lower_90 > 0 and sigma1 > 0",
+            "use weighted refit" if use_weighted else "use unweighted refit",
+            (
+                "heteroscedastic variance model selected"
+                if use_weighted
+                else "sigma1 interval did not support weighting"
+            ),
+            "VarianceAnalysis",
+        )
+    )
+
     # Step 5 - Refit with eligible run-out rows treated as temporary failures.
-    refit_data = _gjb18a_refit_data(active, e_min_failure)
+    refit_data, refit_audit_table = _gjb18a_refit_data(active, e_min_failure)
+    audit_steps["Step04_RefitData"] = _audit_step(
+        "Step04_RefitData",
+        "Refit data selection",
+        "completed",
+        refit_audit_table,
+        input_columns=("gjb_response", "gjb_life", "gjb_is_failure"),
+        formulas=("include failure rows and runout rows with response > e_min_failure",),
+        parameters_in={"e_min_failure": e_min_failure},
+        parameters_out={
+            "included_rows": int(refit_audit_table["included_in_refit"].sum()),
+            "runout_treated_as_failure": int(refit_audit_table["gjb18a_runout_treated_as_failure"].sum()),
+        },
+        decision={
+            "temporary_failure_rule": "runout response > e_min_failure is included as temporary failure during refit"
+        },
+        warnings=(),
+    )
     refit = _gjb18a_nls_fit(
         refit_data,
         np.array(
@@ -530,10 +1047,69 @@ def _gjb18a_iteration(
         variance_model=variance_model,
         e_upper_source=float(refit_data["gjb_response"].min()),
     )
-    refit_table = _gjb18a_fit_table(refit, iteration, "Refit")
+    refit_table = _gjb18a_refit_result_table(refit_data, refit, variance_model, iteration)
+    audit_steps["Step05_RefitResult"] = _audit_step(
+        "Step05_RefitResult",
+        "Refit result",
+        "completed" if bool(refit["success"]) else "warning",
+        refit_table,
+        input_columns=("gjb_response", "gjb_y_log10_life"),
+        formulas=(
+            "weighted objective = sum((R/h)^2)" if use_weighted else "unweighted objective = sum(R^2)",
+            "h = sigma0 + sigma1 / response when weighted",
+        ),
+        parameters_in={
+            "initial_parameters": refit["initial_parameters"],
+            "weighted": use_weighted,
+        },
+        parameters_out={
+            "A1_refit": refit["coefficient_a"],
+            "A2_refit": refit["coefficient_b"],
+            "A4_refit": refit["coefficient_c"],
+            "standard_errors": [
+                refit["standard_error_a"],
+                refit["standard_error_b"],
+                refit["standard_error_c"],
+            ],
+            "covariance": refit["covariance"],
+            "converged": bool(refit["success"]),
+            "objective": refit["objective"],
+        },
+        decision={"weighted": use_weighted},
+        warnings=(() if bool(refit["success"]) else (str(refit["optimizer_message"]),)),
+    )
     # Step 6 - Check A2 and A4 significance before any outlier decision is honored.
     significance = _gjb18a_parameter_significance(refit, confidence, iteration)
-    significance_passed = bool(significance["passed"].iloc[0])
+    significance_passed = bool(significance["overall_passed"].iloc[0])
+    audit_steps["Step06_ParameterSignificance"] = _audit_step(
+        "Step06_ParameterSignificance",
+        "Parameter significance",
+        "passed" if significance_passed else "failed",
+        significance,
+        input_columns=("coefficient_b", "coefficient_c", "standard_error_b", "standard_error_c"),
+        formulas=("A2 passes when A2_upper_90 < 0", "A4 passes when its 90% CI excludes 0"),
+        parameters_in={"confidence": confidence, "test_confidence": 0.90},
+        parameters_out={"overall_passed": significance_passed},
+        decision={
+            "A2_upper_90_lt_0": bool(significance.loc[significance["parameter"] == "A2", "passed"].iloc[0]),
+            "A4_ci_excludes_0": bool(significance.loc[significance["parameter"] == "A4", "passed"].iloc[0]),
+        },
+        warnings=tuple(significance.loc[~significance["passed"].astype(bool), "warning"].dropna().astype(str)),
+    )
+    for _, row in significance.iterrows():
+        if row["parameter"] in {"A2", "A4"}:
+            decision_rows.append(
+                _decision_row(
+                    iteration,
+                    "Step06_ParameterSignificance",
+                    str(row["rule"]),
+                    bool(row["passed"]),
+                    str(row["rule"]),
+                    "passed" if bool(row["passed"]) else "failed",
+                    str(row["warning"]),
+                    "ParameterSignificance",
+                )
+            )
     stop_reason = ""
     if not significance_passed:
         stop_reason = (
@@ -541,18 +1117,12 @@ def _gjb18a_iteration(
             "significance test after refitting."
         )
     post_significance_fit = refit
-    fixed_a4_table = pd.DataFrame(
-        [
-            {
-                "iteration": iteration,
-                "stage": "FixedA4LinearFit",
-                "performed": False,
-                "reason": "Skipped because weighted refit was not selected.",
-                "coefficient_a": refit["coefficient_a"],
-                "coefficient_b": refit["coefficient_b"],
-                "coefficient_c": refit["coefficient_c"],
-            }
-        ]
+    fixed_a4_table = _gjb18a_fixed_a4_skipped_table(
+        iteration,
+        refit,
+        "Skipped because weighted refit was not selected."
+        if significance_passed
+        else "Skipped because parameter significance did not pass.",
     )
     # Step 7 - If weighted refit was selected, fix A4 and correct A1/A2 linearly.
     if significance_passed and bool(variance_model["use_weighted"]):
@@ -562,6 +1132,46 @@ def _gjb18a_iteration(
             variance_model,
             iteration,
         )
+    fixed_a4_performed = bool(fixed_a4_table["performed"].iloc[0]) if len(fixed_a4_table) else False
+    audit_steps["Step07_FixedA4LinearFit"] = _audit_step(
+        "Step07_FixedA4LinearFit",
+        "Fixed A4 linear correction",
+        "completed" if fixed_a4_performed else "skipped",
+        fixed_a4_table,
+        input_columns=("gjb_response", "gjb_y_log10_life", "h"),
+        formulas=(
+            "A4 is fixed; A1 and A2 are re-estimated only",
+            "Y_star = y / h, U = 1 / h, V = X / h",
+            "Y_star = A1_corrected * U + A2_corrected * V with no extra intercept",
+        ),
+        parameters_in={"weighted": use_weighted, "significance_passed": significance_passed},
+        parameters_out={
+            "performed": fixed_a4_performed,
+            "A1": post_significance_fit["coefficient_a"],
+            "A2": post_significance_fit["coefficient_b"],
+            "A4": post_significance_fit["coefficient_c"],
+            "note": "A1^2 and A2^2 in the document are corrected parameters, not squared values.",
+            "A3": "not fitted; response is used directly as equivalent strain",
+            "equivalence": "_weighted_linear_fit(x, y, weights=1/h^2) is equivalent to no-intercept regression Y*=A1*U+A2*V.",
+        },
+        decision={
+            "rule": "perform only when weighted refit is selected and parameter significance passes",
+            "performed": fixed_a4_performed,
+        },
+        warnings=(),
+    )
+    decision_rows.append(
+        _decision_row(
+            iteration,
+            "Step07_FixedA4LinearFit",
+            "weighted selected and significance passed ?",
+            {"weighted": use_weighted, "significance_passed": significance_passed},
+            "use_weighted and significance_passed",
+            "fixed A4 correction performed" if fixed_a4_performed else "fixed A4 correction skipped",
+            str(fixed_a4_table["reason"].iloc[0]) if "reason" in fixed_a4_table else "",
+            "FixedA4LinearFit",
+        )
+    )
 
     # Step 8 - Compute studentized residuals and decide whether one row should be removed.
     residual_table, residual_summary = _gjb18a_residuals_and_outlier_statistics(
@@ -569,18 +1179,56 @@ def _gjb18a_iteration(
         post_significance_fit,
         variance_model,
         iteration,
+        outlier_mode,
     )
+    if not significance_passed:
+        residual_summary["remove_outlier"] = False
+        residual_summary["removed_row_id"] = None
+        residual_summary["outlier_decision_reason"] = (
+            "Parameter significance failed; outlier candidate is reported but not removed."
+        )
+        residual_table["remove_outlier"] = False
+        residual_table["removed_row_id"] = None
+        residual_table["outlier_decision_reason"] = residual_summary["outlier_decision_reason"]
     remove_outlier = bool(residual_summary["remove_outlier"])
     removed_row_id = residual_summary.get("removed_row_id", None)
     outlier_table = residual_table.copy()
-    outlier_table["outlier_G"] = residual_summary["G"]
-    outlier_table["outlier_critical"] = residual_summary["critical"]
-    outlier_table["outlier_remove"] = False
-    if remove_outlier:
-        outlier_table.loc[
-            outlier_table["gjb_row_id"].astype(int) == int(removed_row_id),
-            "outlier_remove",
-        ] = True
+    audit_steps["Step08_ResidualsOutliers"] = _audit_step(
+        "Step08_ResidualsOutliers",
+        "Residuals and outliers",
+        "candidate" if bool(residual_summary["candidate_found"]) else "completed",
+        residual_table,
+        input_columns=("gjb_response", "gjb_y_log10_life"),
+        formulas=("G = max(abs(studentized residual))", "critical = t(1-alpha/(2n), n-k-1)"),
+        parameters_in={"outlier_mode": outlier_mode, "alpha": residual_summary["alpha"]},
+        parameters_out=residual_summary,
+        decision={
+            "candidate_found": bool(residual_summary["candidate_found"]),
+            "remove_outlier": remove_outlier,
+            "reason": residual_summary["outlier_decision_reason"],
+        },
+        warnings=(),
+    )
+    decision_rows.append(
+        _decision_row(
+            iteration,
+            "Step08_ResidualsOutliers",
+            "G > critical ?",
+            {"G": residual_summary["G"], "critical": residual_summary["critical"]},
+            "G > critical",
+            (
+                "outlier removed"
+                if remove_outlier
+                else (
+                    "outlier candidate reported only"
+                    if bool(residual_summary["candidate_found"]) and outlier_mode == "report-only"
+                    else "no outlier removed"
+                )
+            ),
+            str(residual_summary["outlier_decision_reason"]),
+            "Residuals",
+        )
+    )
 
     # Step 9 - Return both scalar decisions and review tables for this iteration.
     return {
@@ -596,11 +1244,14 @@ def _gjb18a_iteration(
         "outlier_table": outlier_table,
         "remove_outlier": remove_outlier if significance_passed else False,
         "removed_row_id": removed_row_id,
+        "outlier_mode": outlier_mode,
+        "audit_steps": audit_steps,
+        "decision_rows": decision_rows,
         "tables": [
             ("InitialOLS", initial_ols),
             ("InitialNLS", initial_nls_table),
             ("VarianceAnalysis", variance_table),
-            ("RefitData", refit_data.copy()),
+            ("RefitData", refit_audit_table),
             ("RefitResult", refit_table),
             ("ParameterSignificance", significance),
             ("FixedA4LinearFit", fixed_a4_table),
@@ -658,6 +1309,7 @@ def _gjb18a_nls_fit(
     start = np.asarray(initial, dtype=float).copy()
     start[1] = min(start[1], -1e-8)
     start[2] = min(max(start[2], lower[2] + epsilon), upper[2] - epsilon)
+    optimizer_start = start.copy()
 
     result = optimize.least_squares(
         _gjb18a_nls_residual,
@@ -676,6 +1328,7 @@ def _gjb18a_nls_fit(
     residual = y - y_hat
     h_values = _gjb18a_h_values(response, variance_model) if weighted else np.ones_like(response)
     weighted_residual = residual / h_values
+    objective_component = weighted_residual**2
     df = max(1, len(frame) - 3)
     rmse = float(np.sqrt(np.sum(weighted_residual**2) / df))
     covariance = rmse**2 * np.linalg.pinv(result.jac.T @ result.jac)
@@ -688,6 +1341,10 @@ def _gjb18a_nls_fit(
         "y_hat": y_hat,
         "residual": residual,
         "weighted_residual": weighted_residual,
+        "h_values": h_values,
+        "weights": 1.0 / np.power(h_values, 2),
+        "objective_component": objective_component,
+        "objective": float(np.sum(objective_component)),
         "rmse": rmse,
         "covariance": covariance,
         "standard_error_a": float(standard_errors[0]),
@@ -696,6 +1353,9 @@ def _gjb18a_nls_fit(
         "success": bool(result.success),
         "optimizer_message": str(result.message),
         "weighted": weighted,
+        "initial_parameters": optimizer_start,
+        "lower_bounds": lower,
+        "upper_bounds": upper,
     }
 
 
@@ -753,6 +1413,16 @@ def _gjb18a_variance_model(
     sigma1_lower = float(sigma1 - t90 * standard_error_sigma1)
     sigma1_upper = float(sigma1 + t90 * standard_error_sigma1)
     use_weighted = bool(sigma1_lower > 0.0 and sigma1 > 0.0)
+    h_raw = sigma0 + sigma1 / response
+    h_nonpositive_mask = h_raw <= 0.0
+    h_values = np.maximum(h_raw, 1e-12)
+    variance_warnings: list[str] = []
+    if force_zero_intercept:
+        variance_warnings.append("sigma0 was negative and the variance model was refit through zero.")
+    if np.any(h_nonpositive_mask):
+        variance_warnings.append(
+            "Raw h = sigma0 + sigma1/response had non-positive value(s); numerical clipping to 1e-12 was applied."
+        )
     variance_model = {
         "sigma0": sigma0,
         "sigma1": sigma1,
@@ -761,6 +1431,9 @@ def _gjb18a_variance_model(
         "standard_error_sigma1": standard_error_sigma1,
         "use_weighted": use_weighted,
         "force_zero_intercept": force_zero_intercept,
+        "h_nonpositive_count": int(np.sum(h_nonpositive_mask)),
+        "h_values_clipped": bool(np.any(h_nonpositive_mask)),
+        "warnings": tuple(variance_warnings),
     }
     table = failures[
         ["gjb_row_id", "gjb_response", "gjb_life", "gjb_y_log10_life"]
@@ -769,14 +1442,18 @@ def _gjb18a_variance_model(
     table["inverse_response"] = inverse_response
     table["initial_residual"] = residual
     table["scaled_abs_residual"] = scaled_abs_residual
-    table["variance_fit"] = fitted
-    table["variance_residual"] = residual_scale
     table["sigma0"] = sigma0
     table["sigma1"] = sigma1
+    table["h_raw"] = h_raw
+    table["h"] = h_values
+    table["weight"] = 1.0 / np.power(h_values, 2)
+    table["variance_fit"] = fitted
+    table["variance_residual"] = residual_scale
     table["sigma1_lower_90"] = sigma1_lower
     table["sigma1_upper_90"] = sigma1_upper
     table["use_weighted"] = use_weighted
     table["force_zero_intercept"] = force_zero_intercept
+    table["h_raw_nonpositive"] = h_nonpositive_mask
     return variance_model, table
 
 
@@ -791,16 +1468,38 @@ def _gjb18a_h_values(
     return np.maximum(values, 1e-12)
 
 
-def _gjb18a_refit_data(active: pd.DataFrame, e_min_failure: float) -> pd.DataFrame:
+def _gjb18a_refit_data(active: pd.DataFrame, e_min_failure: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select refit rows and audit temporary-failure treatment.
+
+    GJB/Z 18A 9.3.2 refit uses original failures plus run-out rows whose
+    response exceeds the minimum failure response.  Those run-out rows are
+    temporary failures only for this refit stage; they remain censored in final
+    likelihood output.
+    """
     failure = active["gjb_is_failure"].astype(bool)
     high_runout = (~failure) & (active["gjb_response"].astype(float) > e_min_failure)
-    refit = active[failure | high_runout].copy().reset_index(drop=True)
+    audit = active.copy().reset_index(drop=True)
+    audit["gjb18a_original_is_failure"] = audit["gjb_is_failure"].astype(bool)
+    audit["gjb18a_runout_treated_as_failure"] = high_runout.to_numpy(dtype=bool)
+    audit["gjb18a_temporary_failure"] = (failure | high_runout).to_numpy(dtype=bool)
+    audit["e_min_failure"] = e_min_failure
+    audit["included_in_refit"] = audit["gjb18a_temporary_failure"]
+    audit["inclusion_reason"] = np.select(
+        [
+            audit["gjb18a_original_is_failure"].to_numpy(dtype=bool),
+            audit["gjb18a_runout_treated_as_failure"].to_numpy(dtype=bool),
+        ],
+        [
+            "original failure included",
+            "runout response > e_min_failure; temporarily included as failure",
+        ],
+        default="runout response <= e_min_failure; excluded from refit",
+    )
+    refit = audit[audit["included_in_refit"].astype(bool)].copy().reset_index(drop=True)
     refit["gjb18a_temporary_failure"] = True
-    refit["gjb18a_original_is_failure"] = refit["gjb_is_failure"].astype(bool)
-    refit["gjb18a_runout_treated_as_failure"] = ~refit["gjb18a_original_is_failure"]
     if len(refit) < 4:
         raise ValueError("gjb18a-strain refit requires at least four temporary failure points.")
-    return refit
+    return refit, audit
 
 
 def _gjb18a_fit_table(
@@ -828,11 +1527,72 @@ def _gjb18a_fit_table(
     )
 
 
+def _gjb18a_nls_audit_table(
+    frame: pd.DataFrame,
+    fit: dict[str, object],
+    iteration: int,
+    stage: str,
+) -> pd.DataFrame:
+    """Return the row-level NLS audit table for Formula 136."""
+    table = frame[["gjb_row_id", "gjb_response", "gjb_y_log10_life"]].copy()
+    table["iteration"] = iteration
+    table["stage"] = stage
+    table["A1_initial_nls"] = fit["coefficient_a"]
+    table["A2_initial_nls"] = fit["coefficient_b"]
+    table["A4_initial_nls"] = fit["coefficient_c"]
+    table["X_nls"] = np.asarray(fit["x"], dtype=float)
+    table["y_pred_initial_nls"] = np.asarray(fit["y_hat"], dtype=float)
+    table["residual_initial_nls"] = np.asarray(fit["residual"], dtype=float)
+    table["residual_squared_initial_nls"] = np.asarray(fit["residual"], dtype=float) ** 2
+    table["weighted"] = bool(fit["weighted"])
+    table["optimizer_success"] = bool(fit["success"])
+    table["optimizer_message"] = str(fit["optimizer_message"])
+    return table
+
+
+def _gjb18a_refit_result_table(
+    frame: pd.DataFrame,
+    fit: dict[str, object],
+    variance_model: dict[str, float],
+    iteration: int,
+) -> pd.DataFrame:
+    """Return the row-level refit audit table and objective components."""
+    table = frame[["gjb_row_id", "gjb_response", "gjb_y_log10_life"]].copy()
+    h_values = np.asarray(fit["h_values"], dtype=float)
+    residual = np.asarray(fit["residual"], dtype=float)
+    weighted = bool(fit["weighted"])
+    table["iteration"] = iteration
+    table["h"] = h_values
+    table["weight"] = 1.0 / np.power(h_values, 2)
+    table["weighted"] = weighted
+    table["A1_refit"] = fit["coefficient_a"]
+    table["A2_refit"] = fit["coefficient_b"]
+    table["A4_refit"] = fit["coefficient_c"]
+    table["X_refit"] = np.asarray(fit["x"], dtype=float)
+    table["y_pred_refit"] = np.asarray(fit["y_hat"], dtype=float)
+    table["residual_refit"] = residual
+    table["weighted_residual_refit"] = np.asarray(fit["weighted_residual"], dtype=float)
+    table["objective_component"] = (
+        np.power(residual / h_values, 2)
+        if weighted and bool(variance_model.get("use_weighted", False))
+        else np.power(residual, 2)
+    )
+    table["optimizer_success"] = bool(fit["success"])
+    table["optimizer_message"] = str(fit["optimizer_message"])
+    return table
+
+
 def _gjb18a_parameter_significance(
     fit: dict[str, object],
     confidence: float,
     iteration: int,
 ) -> pd.DataFrame:
+    """Audit the 90% significance checks for A2 and A4.
+
+    A2 must have an upper 90% confidence bound below zero.  A4 must have a
+    90% confidence interval that excludes zero.  Failure of either check stops
+    the later outlier-removal decision from changing the dataset.
+    """
     df = max(1, int(round(len(np.asarray(fit["residual"])) - 3)))
     t90 = float(stats.t.ppf(0.95, df))
     b = float(fit["coefficient_b"])
@@ -845,6 +1605,7 @@ def _gjb18a_parameter_significance(
     c_upper = c + t90 * se_c
     a2_pass = bool(b_upper < 0.0)
     a4_pass = bool(c_lower > 0.0 or c_upper < 0.0)
+    overall_passed = bool(a2_pass and a4_pass)
     return pd.DataFrame(
         [
             {
@@ -853,18 +1614,32 @@ def _gjb18a_parameter_significance(
                 "test_confidence": 0.90,
                 "degrees_of_freedom": df,
                 "t_critical_90": t90,
-                "A2": b,
-                "A2_standard_error": se_b,
-                "A2_lower_90": b_lower,
-                "A2_upper_90": b_upper,
-                "A2_significant_negative": a2_pass,
-                "A4": c,
-                "A4_standard_error": se_c,
-                "A4_lower_90": c_lower,
-                "A4_upper_90": c_upper,
-                "A4_significant_nonzero": a4_pass,
-                "passed": bool(a2_pass and a4_pass),
-            }
+                "parameter": "A2",
+                "estimate": b,
+                "standard_error": se_b,
+                "lower_90": b_lower,
+                "upper_90": b_upper,
+                "rule": "A2_upper_90 < 0",
+                "passed": a2_pass,
+                "warning": "" if a2_pass else "A2 is not significantly negative; stop after refit.",
+                "overall_passed": overall_passed,
+            },
+            {
+                "iteration": iteration,
+                "confidence": confidence,
+                "test_confidence": 0.90,
+                "degrees_of_freedom": df,
+                "t_critical_90": t90,
+                "parameter": "A4",
+                "estimate": c,
+                "standard_error": se_c,
+                "lower_90": c_lower,
+                "upper_90": c_upper,
+                "rule": "A4_lower_90 > 0 or A4_upper_90 < 0",
+                "passed": a4_pass,
+                "warning": "" if a4_pass else "A4 confidence interval includes zero; stop after refit.",
+                "overall_passed": overall_passed,
+            },
         ]
     )
 
@@ -875,7 +1650,13 @@ def _gjb18a_fixed_a4_linear_fit(
     variance_model: dict[str, float],
     iteration: int,
 ) -> tuple[dict[str, object], pd.DataFrame]:
-    # Formula 136 correction after weighted fitting: fix A4 and re-estimate A1/A2 linearly.
+    """Correct A1/A2 with A4 fixed after weighted fitting.
+
+    The implementation uses ``_weighted_linear_fit(x, y, weights=1/h^2)``.
+    This is mathematically equivalent to the no-intercept regression
+    ``Y* = A1 * U + A2 * V`` where ``Y*=y/h``, ``U=1/h`` and ``V=X/h``.
+    No A3/equivalent-strain recalculation is performed in this project.
+    """
     c = float(refit["coefficient_c"])
     response = refit_data["gjb_response"].to_numpy(dtype=float)
     y = refit_data["gjb_y_log10_life"].to_numpy(dtype=float)
@@ -908,24 +1689,63 @@ def _gjb18a_fixed_a4_linear_fit(
             "optimizer_message": "A1/A2 corrected by weighted linear regression with fixed A4.",
         }
     )
-    table = pd.DataFrame(
+    table = refit_data.copy()
+    table["iteration"] = iteration
+    table["stage"] = "FixedA4LinearFit"
+    table["performed"] = True
+    table["reason"] = "Weighted refit selected; A4 fixed and A1/A2 corrected."
+    table["A4_fixed"] = c
+    table["A1_corrected"] = corrected["coefficient_a"]
+    table["A2_corrected"] = corrected["coefficient_b"]
+    table["h"] = h_values
+    table["weight"] = weights
+    table["X"] = x
+    table["Y_star"] = y / h_values
+    table["U"] = 1.0 / h_values
+    table["V"] = x / h_values
+    table["Y_star_pred"] = corrected["coefficient_a"] * table["U"] + corrected["coefficient_b"] * table["V"]
+    table["residual_star"] = table["Y_star"] - table["Y_star_pred"]
+    table["residual_original_scale"] = residual
+    table["weighted_residual"] = weighted_residual
+    table["rmse"] = rmse
+    table["standard_error_a"] = corrected["standard_error_a"]
+    table["standard_error_b"] = corrected["standard_error_b"]
+    table["standard_error_c"] = corrected["standard_error_c"]
+    return corrected, table
+
+
+def _gjb18a_fixed_a4_skipped_table(
+    iteration: int,
+    refit: dict[str, object],
+    reason: str,
+) -> pd.DataFrame:
+    """Return an auditable placeholder when fixed-A4 correction is skipped."""
+    return pd.DataFrame(
         [
             {
                 "iteration": iteration,
                 "stage": "FixedA4LinearFit",
-                "performed": True,
-                "reason": "Weighted refit selected; A4 fixed and A1/A2 corrected.",
-                "coefficient_a": corrected["coefficient_a"],
-                "coefficient_b": corrected["coefficient_b"],
-                "coefficient_c": corrected["coefficient_c"],
-                "standard_error_a": corrected["standard_error_a"],
-                "standard_error_b": corrected["standard_error_b"],
-                "standard_error_c": corrected["standard_error_c"],
-                "rmse": corrected["rmse"],
+                "performed": False,
+                "reason": reason,
+                "gjb_row_id": np.nan,
+                "gjb_response": np.nan,
+                "gjb_y_log10_life": np.nan,
+                "A4_fixed": refit["coefficient_c"],
+                "A1_corrected": refit["coefficient_a"],
+                "A2_corrected": refit["coefficient_b"],
+                "h": np.nan,
+                "weight": np.nan,
+                "X": np.nan,
+                "Y_star": np.nan,
+                "U": np.nan,
+                "V": np.nan,
+                "Y_star_pred": np.nan,
+                "residual_star": np.nan,
+                "residual_original_scale": np.nan,
+                "weighted_residual": np.nan,
             }
         ]
     )
-    return corrected, table
 
 
 def _gjb18a_residuals_and_outlier_statistics(
@@ -933,8 +1753,14 @@ def _gjb18a_residuals_and_outlier_statistics(
     fit: dict[str, object],
     variance_model: dict[str, float],
     iteration: int,
+    outlier_mode: str,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    # GJB/Z 18A 9.3.2.4.4: externally studentized residual maximum test.
+    """Compute residual diagnostics and the auditable outlier decision.
+
+    ``auto`` keeps the historical behavior and removes the candidate when
+    ``G > critical``.  ``report-only`` records the same candidate but keeps all
+    rows active for manual review.
+    """
     a = float(fit["coefficient_a"])
     b = float(fit["coefficient_b"])
     c = float(fit["coefficient_c"])
@@ -976,7 +1802,18 @@ def _gjb18a_residuals_and_outlier_statistics(
     abs_t = np.abs(studentized)
     max_index = int(np.nanargmax(abs_t)) if len(abs_t) else 0
     G = float(abs_t[max_index]) if len(abs_t) else 0.0
-    remove_outlier = bool(np.isfinite(G) and G > critical)
+    candidate_found = bool(np.isfinite(G) and G > critical)
+    remove_outlier = bool(candidate_found and outlier_mode == "auto")
+    candidate_row_id = int(refit_data.iloc[max_index]["gjb_row_id"]) if len(refit_data) else None
+    removed_row_id = candidate_row_id if remove_outlier else None
+    if candidate_found and outlier_mode == "auto":
+        decision_reason = f"G={G:.6g} > critical={critical:.6g}; auto mode removes row {candidate_row_id}."
+    elif candidate_found:
+        decision_reason = (
+            f"G={G:.6g} > critical={critical:.6g}; report-only mode keeps row {candidate_row_id}."
+        )
+    else:
+        decision_reason = f"G={G:.6g} <= critical={critical:.6g}; no outlier candidate."
     table = refit_data.copy()
     table["iteration"] = iteration
     table["gjb18a_x"] = x
@@ -993,13 +1830,33 @@ def _gjb18a_residuals_and_outlier_statistics(
     table["gjb18a_abs_studentized_residual"] = abs_t
     table["gjb18a_outlier_critical"] = critical
     table["gjb18a_is_max_abs_t"] = False
+    table["k"] = k
+    table["df"] = df
+    table["alpha"] = alpha
+    table["G"] = G
+    table["critical"] = critical
+    table["candidate_row_id"] = candidate_row_id
+    table["candidate_outlier"] = False
+    table["remove_outlier"] = False
+    table["removed_row_id"] = removed_row_id
+    table["outlier_mode"] = outlier_mode
+    table["outlier_decision_reason"] = decision_reason
     if len(table):
         table.loc[table.index[max_index], "gjb18a_is_max_abs_t"] = True
+        table.loc[table.index[max_index], "candidate_outlier"] = candidate_found
+        table.loc[table.index[max_index], "remove_outlier"] = remove_outlier
     summary = {
         "G": G,
         "critical": critical,
+        "alpha": alpha,
+        "k": k,
+        "df": df,
+        "candidate_found": candidate_found,
+        "candidate_row_id": candidate_row_id,
         "remove_outlier": remove_outlier,
-        "removed_row_id": int(table.loc[table.index[max_index], "gjb_row_id"]) if remove_outlier else None,
+        "removed_row_id": removed_row_id,
+        "outlier_mode": outlier_mode,
+        "outlier_decision_reason": decision_reason,
     }
     return table, summary
 
@@ -1009,7 +1866,12 @@ def _gjb18a_final_mle(
     fit: dict[str, object],
     variance_model: dict[str, float],
 ) -> dict[str, object]:
-    # GJB/Z 18A 9.3.2.7.2: A4 and SD_i are fixed; only A1/A2 are corrected by MLE.
+    """Apply the final right-censored likelihood correction.
+
+    GJB/Z 18A 9.3.2.7.2 fixes A4 and SD_i and corrects only A1/A2.  Failure
+    rows contribute normal ``logpdf`` terms; run-out rows contribute survival
+    ``logsf`` terms and are not converted to ordinary failure points.
+    """
     c = float(fit["coefficient_c"])
     response = active["gjb_response"].to_numpy(dtype=float)
     y = active["gjb_y_log10_life"].to_numpy(dtype=float)
@@ -1051,19 +1913,37 @@ def _gjb18a_final_mle(
     standard_errors = np.sqrt(np.maximum(np.diag(covariance_original), 0.0))
     mu = a + b * x
     likelihood = active[domain].copy().reset_index(drop=True)
-    likelihood["gjb18a_x"] = x
-    likelihood["gjb18a_sd_i"] = sd_i
-    likelihood["gjb18a_mu"] = mu
-    likelihood["gjb18a_w"] = (y_fit - mu) / sd_i
-    likelihood["gjb18a_logpdf"] = stats.norm.logpdf(likelihood["gjb18a_w"]) - np.log(sd_i)
-    likelihood["gjb18a_logsf"] = stats.norm.logsf(likelihood["gjb18a_w"])
-    likelihood["gjb18a_log_likelihood_i"] = np.where(
+    likelihood["domain_valid"] = True
+    likelihood["x"] = x
+    likelihood["sd_i"] = sd_i
+    likelihood["mu"] = mu
+    likelihood["w"] = (y_fit - mu) / sd_i
+    likelihood["logpdf"] = stats.norm.logpdf(likelihood["w"]) - np.log(sd_i)
+    likelihood["logsf"] = stats.norm.logsf(likelihood["w"])
+    likelihood["likelihood_type"] = np.where(failures_fit, "logpdf", "logsf")
+    likelihood["log_likelihood_i"] = np.where(
         failures_fit,
-        likelihood["gjb18a_logpdf"],
-        likelihood["gjb18a_logsf"],
+        likelihood["logpdf"],
+        likelihood["logsf"],
     )
+    likelihood["gjb18a_x"] = likelihood["x"]
+    likelihood["gjb18a_sd_i"] = likelihood["sd_i"]
+    likelihood["gjb18a_mu"] = likelihood["mu"]
+    likelihood["gjb18a_w"] = likelihood["w"]
+    likelihood["gjb18a_logpdf"] = likelihood["logpdf"]
+    likelihood["gjb18a_logsf"] = likelihood["logsf"]
+    likelihood["gjb18a_log_likelihood_i"] = likelihood["log_likelihood_i"]
     if np.any(~domain):
         excluded = active[~domain].copy()
+        excluded["domain_valid"] = False
+        excluded["x"] = np.nan
+        excluded["sd_i"] = np.nan
+        excluded["mu"] = np.nan
+        excluded["w"] = np.nan
+        excluded["logpdf"] = np.nan
+        excluded["logsf"] = np.nan
+        excluded["likelihood_type"] = "excluded_domain"
+        excluded["log_likelihood_i"] = np.nan
         excluded["gjb18a_x"] = np.nan
         excluded["gjb18a_sd_i"] = np.nan
         excluded["gjb18a_mu"] = np.nan
@@ -1084,6 +1964,56 @@ def _gjb18a_final_mle(
         "optimizer_message": str(result.message),
         "likelihood": likelihood,
     }
+
+
+def _gjb18a_final_mle_audit_table(likelihood: pd.DataFrame) -> pd.DataFrame:
+    """Normalize likelihood rows to the Step09 audit columns."""
+    required = [
+        "gjb_row_id",
+        "gjb_is_failure",
+        "gjb_original_status",
+        "gjb_response",
+        "gjb_life",
+        "gjb_y_log10_life",
+        "domain_valid",
+        "x",
+        "sd_i",
+        "mu",
+        "w",
+        "logpdf",
+        "logsf",
+        "likelihood_type",
+        "log_likelihood_i",
+    ]
+    table = likelihood.copy()
+    for column in required:
+        if column not in table.columns:
+            table[column] = np.nan
+    return table[required + [column for column in table.columns if column not in required]]
+
+
+def _gjb18a_final_mle_skipped_table(active: pd.DataFrame, coefficient_c: float) -> pd.DataFrame:
+    """Return Step09 rows when MLE is skipped after failed significance checks."""
+    table = active[
+        [
+            "gjb_row_id",
+            "gjb_is_failure",
+            "gjb_original_status",
+            "gjb_response",
+            "gjb_life",
+            "gjb_y_log10_life",
+        ]
+    ].copy()
+    table["domain_valid"] = table["gjb_response"].astype(float) > coefficient_c
+    table["x"] = np.nan
+    table["sd_i"] = np.nan
+    table["mu"] = np.nan
+    table["w"] = np.nan
+    table["logpdf"] = np.nan
+    table["logsf"] = np.nan
+    table["likelihood_type"] = "skipped"
+    table["log_likelihood_i"] = np.nan
+    return table
 
 
 def _gjb18a_final_mle_negative_log_likelihood(
@@ -1137,6 +2067,107 @@ def _gjb18a_curve(
     ).sort_values("life_fit").reset_index(drop=True)
 
 
+def _gjb18a_final_residual_statistics(
+    fit_sample: pd.DataFrame,
+    coefficient_a: float,
+    coefficient_b: float,
+    coefficient_c: float,
+    variance_model: dict[str, float],
+) -> pd.DataFrame:
+    """Compute document-style final residual statistics.
+
+    Unweighted: ``RMSE = SD = sqrt(sum(R_i^2)/(n-k))``.
+    Weighted: ``WR_i = R_i/h_i``, ``RMSE = sqrt(sum(WR_i^2)/(n-k))``,
+    ``SD_i = RMSE * h_i`` and ``SR_i = R_i/SD_i``.
+    """
+    response = fit_sample["gjb_response"].to_numpy(dtype=float)
+    y = fit_sample["gjb_y_log10_life"].to_numpy(dtype=float)
+    x = _gjb18a_x(response, coefficient_c)
+    y_pred = coefficient_a + coefficient_b * x
+    residual = y - y_pred
+    weighted = bool(variance_model.get("use_weighted", False))
+    h_values = _gjb18a_h_values(response, variance_model) if weighted else np.ones_like(response)
+    k = 3
+    n = len(fit_sample)
+    df = max(1, n - k)
+    weighted_residual = residual / h_values if weighted else residual
+    rmse = float(np.sqrt(np.sum(weighted_residual**2) / df))
+    sd_i = rmse * h_values if weighted else np.full_like(residual, rmse)
+    standardized = residual / np.maximum(sd_i, 1e-300)
+    table = fit_sample[["gjb_row_id", "gjb_response", "gjb_life", "gjb_y_log10_life"]].copy()
+    table["y"] = y
+    table["y_pred_final"] = y_pred
+    table["residual_final"] = residual
+    table["h"] = h_values
+    table["weighted_residual"] = weighted_residual
+    table["RMSE"] = rmse
+    table["SD_i"] = sd_i
+    table["standardized_residual"] = standardized
+    table["k"] = k
+    table["n"] = n
+    table["df"] = df
+    table["weighted"] = weighted
+    return table
+
+
+def _gjb18a_model_assessment(final_residuals: pd.DataFrame) -> pd.DataFrame:
+    """Compute the document Durbin-Watson style model assessment statistic."""
+    ordered = final_residuals.sort_values("gjb_response").reset_index(drop=True).copy()
+    sr = ordered["standardized_residual"].to_numpy(dtype=float)
+    denominator = float(np.sum(sr**2))
+    D = float(np.sum(np.diff(sr) ** 2) / denominator) if denominator > 0.0 else np.nan
+    n = len(ordered)
+    Dcrit = float(2.0 - 4.73 / np.power(n, 0.555)) if n > 0 else np.nan
+    possible_misfit = bool(np.isfinite(D) and np.isfinite(Dcrit) and D < Dcrit)
+    previous = np.concatenate(([np.nan], sr[:-1])) if len(sr) else np.asarray([], dtype=float)
+    ordered["sort_order"] = np.arange(1, len(ordered) + 1, dtype=int)
+    ordered["previous_standardized_residual"] = previous
+    ordered["diff_from_previous"] = ordered["standardized_residual"] - ordered["previous_standardized_residual"]
+    ordered["diff_squared"] = ordered["diff_from_previous"] ** 2
+    ordered["D"] = D
+    ordered["Dcrit"] = Dcrit
+    ordered["D_lt_Dcrit"] = possible_misfit
+    ordered["possible_misfit"] = possible_misfit
+    ordered["multi_strain_ratio_residual_mean_check"] = "not applicable: response is used directly as equivalent strain"
+    return ordered
+
+
+def _gjb18a_document_style_r2(
+    final_residuals: pd.DataFrame,
+    old_r2: float,
+) -> pd.DataFrame:
+    """Compute document-style R2 without replacing the legacy SSE/TSS value."""
+    y = final_residuals["y"].to_numpy(dtype=float)
+    h = final_residuals["h"].to_numpy(dtype=float)
+    weighted = bool(final_residuals["weighted"].iloc[0]) if len(final_residuals) else False
+    rmse = float(final_residuals["RMSE"].iloc[0]) if len(final_residuals) else np.nan
+    y_bar = float(np.mean(y)) if len(y) else np.nan
+    if len(y) <= 1:
+        rte = np.nan
+    elif weighted:
+        rte = float(np.sqrt(np.sum(((y - y_bar) / h) ** 2) / (len(y) - 1)))
+    else:
+        rte = float(np.sqrt(np.sum((y - y_bar) ** 2) / (len(y) - 1)))
+    r2_document = float(1.0 - (rmse**2) / (rte**2)) if rte and np.isfinite(rte) else np.nan
+    return pd.DataFrame(
+        [
+            {
+                "old_r2_log_life": old_r2,
+                "r2_document_style": r2_document,
+                "weighted": weighted,
+                "RMSE": rmse,
+                "RTE": rte,
+                "formula": "R2 = 1 - RMSE^2 / RTE^2",
+                "RTE_formula": (
+                    "sqrt(sum(((y_i - y_bar)/h_i)^2)/(n-1))"
+                    if weighted
+                    else "sqrt(sum((y_i - y_bar)^2)/(n-1))"
+                ),
+            }
+        ]
+    )
+
+
 def _gjb18a_extra_tables(
     iteration_records: list[tuple[str, pd.DataFrame]],
     outlier_records: list[pd.DataFrame],
@@ -1144,6 +2175,11 @@ def _gjb18a_extra_tables(
     removed: pd.DataFrame,
     mle_state: dict[str, object] | None,
     final_state: dict[str, object],
+    decision_log: pd.DataFrame,
+    final_residual_statistics: pd.DataFrame,
+    model_assessment: pd.DataFrame,
+    r2_document_style: pd.DataFrame,
+    final_mle_audit_table: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
     tables: dict[str, list[pd.DataFrame]] = {}
     for name, frame in iteration_records:
@@ -1153,6 +2189,11 @@ def _gjb18a_extra_tables(
         tables.setdefault("OutlierIterations", []).append(pd.concat(outlier_records, ignore_index=True))
     if not removed.empty:
         tables.setdefault("RemovedOutliers", []).append(removed)
+    if not decision_log.empty:
+        tables.setdefault("DecisionLog", []).append(decision_log)
+    tables.setdefault("FinalResidualStatistics", []).append(final_residual_statistics)
+    tables.setdefault("ModelAssessment", []).append(model_assessment)
+    tables.setdefault("R2DocumentStyle", []).append(r2_document_style)
     if mle_state is not None:
         tables.setdefault("FinalMLE", []).append(
             pd.DataFrame(
@@ -1172,6 +2213,25 @@ def _gjb18a_extra_tables(
             )
         )
         tables.setdefault("Likelihood", []).append(mle_state["likelihood"])
+    else:
+        tables.setdefault("FinalMLE", []).append(
+            pd.DataFrame(
+                [
+                    {
+                        "coefficient_a": final_state["post_significance_fit"]["coefficient_a"],
+                        "coefficient_b": final_state["post_significance_fit"]["coefficient_b"],
+                        "coefficient_c": final_state["post_significance_fit"]["coefficient_c"],
+                        "standard_error_a": final_state["post_significance_fit"]["standard_error_a"],
+                        "standard_error_b": final_state["post_significance_fit"]["standard_error_b"],
+                        "log_likelihood": np.nan,
+                        "negative_log_likelihood": np.nan,
+                        "success": False,
+                        "optimizer_message": final_state["stop_reason"] or "Final MLE was skipped.",
+                    }
+                ]
+            )
+        )
+        tables.setdefault("Likelihood", []).append(final_mle_audit_table)
     model_checks = pd.DataFrame(
         [
             {
@@ -1181,6 +2241,7 @@ def _gjb18a_extra_tables(
                 "use_weighted": final_state["variance_model"]["use_weighted"],
                 "sigma0": final_state["variance_model"]["sigma0"],
                 "sigma1": final_state["variance_model"]["sigma1"],
+                "outlier_mode": final_state.get("outlier_mode", ""),
             }
         ]
     )

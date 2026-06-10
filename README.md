@@ -58,6 +58,44 @@ GJB-005,0.0065,3500,runout
 .\.venv\Scripts\python.exe -m originnsfitgjb --input data --output output --life "life" --response "strain" --status "status" --dry-run
 ```
 
+## 审计输出
+
+需要人工复核每一步计算时，启用审计模式：
+
+```powershell
+.\.venv\Scripts\python.exe -m originnsfitgjb --input examples --output output --pattern gjb18a_strain_example.csv --status status --dry-run --audit --audit-workbook
+```
+
+默认审计目录：
+
+```text
+output\audit\
+output\audit\tables\<label>\
+output\audit\json\<label>\
+output\audit\gjb_decision_log.csv
+output\audit\gjb_audit_workbook.xlsx
+output\audit\gjb_manual_checklist.md
+```
+
+`output\audit\gjb_audit_workbook.xlsx` 面向不写程序的复核人员：每个 Step 工作表顶部写明本步骤目的、公式、输入列、输出列和判定规则，下方是逐行数据。`ManualCheck` Sheet 与 `gjb_manual_checklist.md` 列出可在 Excel 中手工复算的检查项。
+
+`gjb_decision_log.csv` 记录流程判定，例如是否加权、参数显著性是否通过、固定 A4 线性修正是否执行、异常值是否删除、runout 是否进入 MLE 的 `logsf` 项。
+
+异常值模式：
+
+```powershell
+--outlier-mode auto         # 默认，保持自动剔除并迭代
+--outlier-mode report-only  # 只报告候选异常值，不删除数据
+```
+
+即使 Origin 自动化失败，Python 侧 CSV、JSON、Excel 审计输出也会先完整保存。当前模型仍为：
+
+```text
+log10(Nf) = A1 + A2 * log10(response - A4)
+```
+
+其中 `response` 直接作为等效应变输入，当前项目不拟合 A3。
+
 ## 生成 Origin 项目
 
 确认 dry-run 成功后，去掉 `--dry-run`：
@@ -105,6 +143,10 @@ output\gjb_outlieriterations.csv
 output\gjb_finalmle.csv
 output\gjb_likelihood.csv
 output\gjb_modelchecks.csv
+output\gjb_decisionlog.csv
+output\gjb_finalresidualstatistics.csv
+output\gjb_modelassessment.csv
+output\gjb_r2documentstyle.csv
 ```
 
 ## 打包 exe
