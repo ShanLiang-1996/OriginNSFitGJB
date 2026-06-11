@@ -169,6 +169,7 @@ dist\OriginNSFitGJB.exe
 2. 确认没有首次启动弹窗、许可证弹窗或用户文件夹设置弹窗阻塞自动化。
 3. 先运行 `--dry-run` 确认数据与拟合流程无误。
 4. 查看 `output\origin_automation.log` 中的真实异常。
+5. 程序退出时会先调用 Origin 正常退出；如果本次自动化新启动的 Origin 进程仍残留，会自动清理该进程。运行前已存在的 Origin 进程不会被清理。
 
 ## 目录结构
 

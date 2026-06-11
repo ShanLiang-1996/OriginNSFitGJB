@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import csv
 from contextlib import ExitStack
 from dataclasses import dataclass
 from importlib import resources
 import math
+import os
 from pathlib import Path
 import re
+import subprocess
+import time
 
 import pandas as pd
 
@@ -34,6 +38,8 @@ RUNOUT_TEXT_ARROW_LINEAR_OFFSET_FRACTION = 0.055
 RUNOUT_TEXT_ARROW_LOG_Y_OFFSET = 1.106
 RUNOUT_TEXT_ARROW_LINEAR_Y_OFFSET_FRACTION = 0.012
 RUNOUT_TEXT_ARROW_FONT_SIZE = 18
+ORIGIN_PROCESS_NAMES = {"origin.exe", "origin64.exe"}
+ORIGIN_EXIT_TIMEOUT_SECONDS = 6.0
 
 
 class OriginClient:
@@ -48,13 +54,17 @@ class OriginClient:
         self._op = op
         self._visible = visible
         self._resource_stack = ExitStack()
+        self._origin_pids_before: set[int] = set()
+        self._origin_pids_started: set[int] = set()
 
     def __enter__(self) -> "OriginClient":
+        self._origin_pids_before = self._origin_process_ids()
         try:
             self._op.set_show(self._visible)
         except TypeError:
             if self._visible:
                 self._op.set_show()
+        self._remember_started_origin_processes()
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -63,6 +73,8 @@ class OriginClient:
         except Exception:
             pass
         self._resource_stack.close()
+        self._wait_for_started_origin_to_exit()
+        self._terminate_lingering_started_origin_processes()
 
     def create_gjb_project(
         self,
@@ -78,6 +90,7 @@ class OriginClient:
     ) -> tuple[Path, list[dict[str, str]]]:
         # Step 1 - Start from a clean Origin project before writing GJB results.
         self._op.new(False)
+        self._remember_started_origin_processes()
         if not jobs:
             raise OriginAutomationError("No GJB analysis jobs to write to Origin.")
 
@@ -529,6 +542,76 @@ class OriginClient:
             except Exception:
                 continue
             self._write_frame_to_sheet(wks, frame)
+
+    def _remember_started_origin_processes(self) -> None:
+        """Track only Origin processes that appeared after this client started."""
+        current = self._origin_process_ids()
+        self._origin_pids_started.update(current - self._origin_pids_before)
+
+    def _wait_for_started_origin_to_exit(self) -> None:
+        """Give OriginExt a short window to close cleanly after op.exit()."""
+        if not self._origin_pids_started:
+            return
+        deadline = time.monotonic() + ORIGIN_EXIT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if not (self._origin_pids_started & self._origin_process_ids()):
+                return
+            time.sleep(0.25)
+
+    def _terminate_lingering_started_origin_processes(self) -> None:
+        """Force-close only Origin processes started by this automation run."""
+        lingering = sorted(self._origin_pids_started & self._origin_process_ids())
+        own_pid = os.getpid()
+        for pid in lingering:
+            if pid == own_pid:
+                continue
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=8,
+                )
+            except Exception:
+                continue
+        if lingering:
+            print(f"Cleaned up lingering Origin process id(s): {', '.join(map(str, lingering))}")
+
+    @staticmethod
+    def _origin_process_ids() -> set[int]:
+        """Return running Origin application PIDs on Windows without psutil."""
+        if os.name != "nt":
+            return set()
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=8,
+            )
+        except Exception:
+            return set()
+        if result.returncode != 0:
+            return set()
+        return OriginClient._parse_tasklist_origin_pids(result.stdout)
+
+    @staticmethod
+    def _parse_tasklist_origin_pids(output: str) -> set[int]:
+        """Parse tasklist CSV output and keep real Origin app processes only."""
+        pids: set[int] = set()
+        for row in csv.reader(output.splitlines()):
+            if len(row) < 2:
+                continue
+            process_name = row[0].strip().lower()
+            if process_name not in ORIGIN_PROCESS_NAMES:
+                continue
+            try:
+                pids.add(int(row[1]))
+            except ValueError:
+                continue
+        return pids
 
     @staticmethod
     def _safe_origin_sheet_name(text: str, used_names: set[str]) -> str:
