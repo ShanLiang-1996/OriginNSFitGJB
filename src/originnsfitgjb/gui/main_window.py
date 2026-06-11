@@ -18,6 +18,9 @@ from .modules.registry import ModuleRegistry
 from .settings import GuiSettings
 
 
+_PLACEHOLDER_PAGE_MODULES = {"originnsfitgjb.gui.modules.gjb18a_page"}
+
+
 class MainWindow(QMainWindow):
     def __init__(self, registry: ModuleRegistry, settings: GuiSettings) -> None:
         super().__init__()
@@ -55,7 +58,9 @@ class MainWindow(QMainWindow):
     def _create_module_page(self, title: str, create_page: Callable[[], object]) -> QWidget:
         try:
             page = create_page()
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
+            if exc.name not in _PLACEHOLDER_PAGE_MODULES:
+                raise
             return self._placeholder_page(title)
         if not isinstance(page, QWidget):
             raise TypeError(f"GUI module {title} did not create a QWidget.")
