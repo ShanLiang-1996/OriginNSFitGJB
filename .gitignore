@@ -22,6 +22,7 @@ pip-wheel-metadata/
 .env.*
 *.local
 .superpowers/
+.worktrees/
 
 # Runtime logs
 *.log
