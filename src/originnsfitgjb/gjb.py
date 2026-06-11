@@ -467,6 +467,9 @@ def _fit_prepared_gjb18a(
         outlier_table = state["outlier_table"]
         outlier_records.append(outlier_table)
         final_state = state
+        for warning in state.get("workflow_warnings", []):
+            if str(warning) not in warnings:
+                warnings.append(str(warning))
 
         if not state["significance_passed"]:
             warnings.append(str(state["stop_reason"]))
@@ -533,9 +536,9 @@ def _fit_prepared_gjb18a(
             _decision_row(
                 int(final_state["iteration"]),
                 "Step09_FinalMLE",
-                "parameter significance passed ?",
+                "parameter workflow continued ?",
                 significance_passed,
-                "MLE runs only after parameter significance passes",
+                "MLE runs after the Step06 A4 action rule and A2 note are recorded",
                 "final MLE skipped",
                 str(final_state["stop_reason"]),
                 "FinalMLE",
@@ -1110,54 +1113,85 @@ def _gjb18a_iteration(
         decision={"weighted": use_weighted},
         warnings=(() if bool(refit["success"]) else (str(refit["optimizer_message"]),)),
     )
-    # Step 6 - Check A2 and A4 significance before any outlier decision is honored.
+    # Step 6 - Check A4 first, then record A2 significance without stopping the workflow.
     significance = _gjb18a_parameter_significance(refit, confidence, iteration)
-    significance_passed = bool(significance["overall_passed"].iloc[0])
+    a2_significant = bool(significance.loc[significance["parameter"] == "A2", "passed"].iloc[0])
+    a4_lower_90 = float(significance.loc[significance["parameter"] == "A4", "lower_90"].iloc[0])
+    a4_fixed_zero = bool(a4_lower_90 < 0.0)
+    significance_passed = True
+    workflow_warnings: list[str] = []
+    if not a2_significant:
+        workflow_warnings.append(
+            "A2 90% confidence interval does not confirm a significant life-strain relationship; workflow continued."
+        )
+    if a4_fixed_zero:
+        workflow_warnings.append(
+            "A4 90% confidence interval lower bound is negative; A4 was fixed to 0 and A1/A2 were refit linearly."
+        )
     audit_steps["Step06_ParameterSignificance"] = _audit_step(
         "Step06_ParameterSignificance",
         "Parameter significance",
-        "passed" if significance_passed else "failed",
+        "completed",
         significance,
         input_columns=("coefficient_b", "coefficient_c", "standard_error_b", "standard_error_c"),
-        formulas=("A2 passes when A2_upper_90 < 0", "A4 passes when its 90% CI excludes 0"),
+        formulas=(
+            "A4 is fixed to 0 when A4_lower_90 < 0",
+            "A2_upper_90 < 0 is recorded as the life-strain significance note only",
+        ),
         parameters_in={"confidence": confidence, "test_confidence": 0.90},
-        parameters_out={"overall_passed": significance_passed},
-        decision={
-            "A2_upper_90_lt_0": bool(significance.loc[significance["parameter"] == "A2", "passed"].iloc[0]),
-            "A4_ci_excludes_0": bool(significance.loc[significance["parameter"] == "A4", "passed"].iloc[0]),
+        parameters_out={
+            "workflow_continues": significance_passed,
+            "a4_fixed_zero": a4_fixed_zero,
+            "a2_significant_life_strain_relation": a2_significant,
         },
-        warnings=tuple(significance.loc[~significance["passed"].astype(bool), "warning"].dropna().astype(str)),
+        decision={
+            "A4_lower_90_lt_0": a4_fixed_zero,
+            "A2_upper_90_lt_0": a2_significant,
+            "A2_affects_workflow": False,
+        },
+        warnings=tuple(workflow_warnings),
     )
     for _, row in significance.iterrows():
         if row["parameter"] in {"A2", "A4"}:
+            if row["parameter"] == "A4":
+                question = "A4_lower_90 < 0"
+                value = a4_fixed_zero
+                rule = "A4_lower_90 < 0 triggers A4=0"
+            else:
+                question = str(row["rule"])
+                value = bool(row["passed"])
+                rule = str(row["rule"])
             decision_rows.append(
                 _decision_row(
                     iteration,
                     "Step06_ParameterSignificance",
-                    str(row["rule"]),
-                    bool(row["passed"]),
-                    str(row["rule"]),
-                    "passed" if bool(row["passed"]) else "failed",
+                    question,
+                    value,
+                    rule,
+                    str(row["decision"]),
                     str(row["warning"]),
                     "ParameterSignificance",
                 )
             )
     stop_reason = ""
-    if not significance_passed:
-        stop_reason = (
-            "gjb18a-strain stopped because A2 or A4 failed the 90% parameter "
-            "significance test after refitting."
-        )
     post_significance_fit = refit
     fixed_a4_table = _gjb18a_fixed_a4_skipped_table(
         iteration,
         refit,
-        "Skipped because weighted refit was not selected."
-        if significance_passed
-        else "Skipped because parameter significance did not pass.",
+        "Skipped because A4 lower bound was not negative and weighted refit was not selected.",
     )
-    # Step 7 - If weighted refit was selected, fix A4 and correct A1/A2 linearly.
-    if significance_passed and bool(variance_model["use_weighted"]):
+    # Step 7 - If A4's lower 90% bound is negative, fix A4=0; otherwise keep the weighted correction branch.
+    if a4_fixed_zero:
+        post_significance_fit, fixed_a4_table = _gjb18a_fixed_a4_linear_fit(
+            refit_data,
+            refit,
+            variance_model,
+            iteration,
+            fixed_a4=0.0,
+            reason="A4 90% confidence interval lower bound is negative; A4 fixed to 0 and A1/A2 refit linearly.",
+            fixed_a4_standard_error=0.0,
+        )
+    elif bool(variance_model["use_weighted"]):
         post_significance_fit, fixed_a4_table = _gjb18a_fixed_a4_linear_fit(
             refit_data,
             refit,
@@ -1176,9 +1210,11 @@ def _gjb18a_iteration(
             "Y_star = y / h, U = 1 / h, V = X / h",
             "Y_star = A1_corrected * U + A2_corrected * V with no extra intercept",
         ),
-        parameters_in={"weighted": use_weighted, "significance_passed": significance_passed},
+        parameters_in={"weighted": use_weighted, "a4_fixed_zero": a4_fixed_zero},
         parameters_out={
             "performed": fixed_a4_performed,
+            "a4_fixed_zero": a4_fixed_zero,
+            "a2_significant_life_strain_relation": a2_significant,
             "A1": post_significance_fit["coefficient_a"],
             "A2": post_significance_fit["coefficient_b"],
             "A4": post_significance_fit["coefficient_c"],
@@ -1187,7 +1223,7 @@ def _gjb18a_iteration(
             "equivalence": "_weighted_linear_fit(x, y, weights=1/h^2) is equivalent to no-intercept regression Y*=A1*U+A2*V.",
         },
         decision={
-            "rule": "perform only when weighted refit is selected and parameter significance passes",
+            "rule": "perform when A4_lower_90 < 0, otherwise only when weighted refit is selected",
             "performed": fixed_a4_performed,
         },
         warnings=(),
@@ -1196,9 +1232,9 @@ def _gjb18a_iteration(
         _decision_row(
             iteration,
             "Step07_FixedA4LinearFit",
-            "weighted selected and significance passed ?",
-            {"weighted": use_weighted, "significance_passed": significance_passed},
-            "use_weighted and significance_passed",
+            "A4 lower 90% < 0 or weighted selected ?",
+            {"A4_lower_90": a4_lower_90, "a4_fixed_zero": a4_fixed_zero, "weighted": use_weighted},
+            "A4_lower_90 < 0 or use_weighted",
             "fixed A4 correction performed" if fixed_a4_performed else "fixed A4 correction skipped",
             str(fixed_a4_table["reason"].iloc[0]) if "reason" in fixed_a4_table else "",
             "FixedA4LinearFit",
@@ -1272,6 +1308,7 @@ def _gjb18a_iteration(
         "post_significance_fit": post_significance_fit,
         "significance_passed": significance_passed,
         "stop_reason": stop_reason,
+        "workflow_warnings": workflow_warnings,
         "residual_table": residual_table,
         "outlier_table": outlier_table,
         "remove_outlier": remove_outlier if significance_passed else False,
@@ -1619,11 +1656,12 @@ def _gjb18a_parameter_significance(
     confidence: float,
     iteration: int,
 ) -> pd.DataFrame:
-    """Audit the 90% significance checks for A2 and A4.
+    """Audit the 90% A4 action check and A2 significance note.
 
-    A2 must have an upper 90% confidence bound below zero.  A4 must have a
-    90% confidence interval that excludes zero.  Failure of either check stops
-    the later outlier-removal decision from changing the dataset.
+    A4 is checked first.  If its lower 90% bound is negative, later workflow
+    fixes A4 at zero and refits A1/A2 linearly.  A2 significance is reported as
+    a life-strain relationship note and does not block later outlier or MLE
+    operations.
     """
     df = max(1, int(round(len(np.asarray(fit["residual"])) - 3)))
     t90 = float(stats.t.ppf(0.95, df))
@@ -1636,8 +1674,7 @@ def _gjb18a_parameter_significance(
     c_lower = c - t90 * se_c
     c_upper = c + t90 * se_c
     a2_pass = bool(b_upper < 0.0)
-    a4_pass = bool(c_lower > 0.0 or c_upper < 0.0)
-    overall_passed = bool(a2_pass and a4_pass)
+    a4_fixed_zero = bool(c_lower < 0.0)
     return pd.DataFrame(
         [
             {
@@ -1653,8 +1690,18 @@ def _gjb18a_parameter_significance(
                 "upper_90": b_upper,
                 "rule": "A2_upper_90 < 0",
                 "passed": a2_pass,
-                "warning": "" if a2_pass else "A2 is not significantly negative; stop after refit.",
-                "overall_passed": overall_passed,
+                "decision": (
+                    "life-strain relation significant"
+                    if a2_pass
+                    else "life-strain relation not significant; workflow continues"
+                ),
+                "warning": (
+                    ""
+                    if a2_pass
+                    else "A2 is not significantly negative; note that life-strain relationship is not significant."
+                ),
+                "affects_workflow": False,
+                "overall_passed": True,
             },
             {
                 "iteration": iteration,
@@ -1667,10 +1714,16 @@ def _gjb18a_parameter_significance(
                 "standard_error": se_c,
                 "lower_90": c_lower,
                 "upper_90": c_upper,
-                "rule": "A4_lower_90 > 0 or A4_upper_90 < 0",
-                "passed": a4_pass,
-                "warning": "" if a4_pass else "A4 confidence interval includes zero; stop after refit.",
-                "overall_passed": overall_passed,
+                "rule": "A4_lower_90 >= 0 keeps fitted A4; A4_lower_90 < 0 fixes A4=0",
+                "passed": not a4_fixed_zero,
+                "decision": "fix A4=0 and refit linearly" if a4_fixed_zero else "keep fitted A4",
+                "warning": (
+                    "A4 lower 90% confidence bound is negative; A4 will be fixed to 0 and refit linearly."
+                    if a4_fixed_zero
+                    else ""
+                ),
+                "affects_workflow": True,
+                "overall_passed": True,
             },
         ]
     )
@@ -1681,15 +1734,22 @@ def _gjb18a_fixed_a4_linear_fit(
     refit: dict[str, object],
     variance_model: dict[str, float],
     iteration: int,
+    *,
+    fixed_a4: float | None = None,
+    reason: str = "Weighted refit selected; A4 fixed and A1/A2 corrected.",
+    fixed_a4_standard_error: float | None = None,
 ) -> tuple[dict[str, object], pd.DataFrame]:
-    """Correct A1/A2 with A4 fixed after weighted fitting.
+    """Correct A1/A2 with A4 fixed after the Step06/Step07 action rule.
 
-    The implementation uses ``_weighted_linear_fit(x, y, weights=1/h^2)``.
-    This is mathematically equivalent to the no-intercept regression
-    ``Y* = A1 * U + A2 * V`` where ``Y*=y/h``, ``U=1/h`` and ``V=X/h``.
-    No A3/equivalent-strain recalculation is performed in this project.
+    If A4's lower 90% confidence bound is negative, the caller fixes ``A4=0``.
+    Otherwise this correction is used for the weighted branch with the fitted A4
+    fixed.  The implementation uses ``_weighted_linear_fit(x, y,
+    weights=1/h^2)``.  This is mathematically equivalent to the no-intercept
+    regression ``Y* = A1 * U + A2 * V`` where ``Y*=y/h``, ``U=1/h`` and
+    ``V=X/h``.  No A3/equivalent-strain recalculation is performed in this
+    project.
     """
-    c = float(refit["coefficient_c"])
+    c = float(refit["coefficient_c"] if fixed_a4 is None else fixed_a4)
     response = refit_data["gjb_response"].to_numpy(dtype=float)
     y = refit_data["gjb_y_log10_life"].to_numpy(dtype=float)
     x = _gjb18a_x(response, c)
@@ -1702,6 +1762,7 @@ def _gjb18a_fixed_a4_linear_fit(
     rmse = float(np.sqrt(np.sum(weighted_residual**2) / df))
     covariance_ab = covariance_ab * (df / max(1, len(refit_data) - 2))
     se_ab = np.sqrt(np.maximum(np.diag(covariance_ab), 0.0))
+    weighted = bool(variance_model.get("use_weighted", False))
     corrected = dict(refit)
     corrected.update(
         {
@@ -1715,17 +1776,21 @@ def _gjb18a_fixed_a4_linear_fit(
             "rmse": rmse,
             "standard_error_a": float(se_ab[0]),
             "standard_error_b": float(se_ab[1]),
-            "standard_error_c": float(refit["standard_error_c"]),
-            "weighted": True,
+            "standard_error_c": (
+                float(refit["standard_error_c"])
+                if fixed_a4_standard_error is None
+                else float(fixed_a4_standard_error)
+            ),
+            "weighted": weighted,
             "success": True,
-            "optimizer_message": "A1/A2 corrected by weighted linear regression with fixed A4.",
+            "optimizer_message": reason,
         }
     )
     table = refit_data.copy()
     table["iteration"] = iteration
     table["stage"] = "FixedA4LinearFit"
     table["performed"] = True
-    table["reason"] = "Weighted refit selected; A4 fixed and A1/A2 corrected."
+    table["reason"] = reason
     table["A4_fixed"] = c
     table["A1_corrected"] = corrected["coefficient_a"]
     table["A2_corrected"] = corrected["coefficient_b"]
@@ -1819,7 +1884,7 @@ def _gjb18a_residuals_and_outlier_statistics(
     deleted_residual_scale = weighted_residual
     rmse_i_squared = (
         df * rmse**2
-        - np.power(deleted_residual_scale, 2) / np.maximum(1.0 - leverage, 1e-12)
+        - np.power(standardized, 2) / np.maximum(1.0 - leverage, 1e-12)
     ) / max(1, len(refit_data) - k - 1)
     rmse_i = np.sqrt(np.maximum(rmse_i_squared, 1e-300))
     studentized = (

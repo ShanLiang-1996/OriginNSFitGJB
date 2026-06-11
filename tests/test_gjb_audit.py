@@ -99,6 +99,13 @@ class GJBAuditCliTests(unittest.TestCase):
         np.testing.assert_allclose(variance["weight"], 1.0 / np.power(variance["h"], 2))
         refit = pd.read_csv(label_dir / "step04_refit_data.csv")
         self.assertTrue(refit["gjb18a_runout_treated_as_failure"].any())
+        significance = pd.read_csv(label_dir / "step06_parameter_significance.csv")
+        a4_row = significance.loc[significance["parameter"] == "A4"].iloc[0]
+        self.assertLess(float(a4_row["lower_90"]), 0.0)
+        self.assertEqual(str(a4_row["decision"]), "fix A4=0 and refit linearly")
+        step07 = pd.read_csv(label_dir / "step07_fixed_a4_linear_fit.csv")
+        self.assertTrue(step07["performed"].astype(bool).any())
+        self.assertTrue(np.allclose(step07.loc[step07["performed"].astype(bool), "A4_fixed"], 0.0))
 
     def test_mle_likelihood_records_logpdf_and_logsf(self) -> None:
         input_dir = self.tmpdir / "mle_in"
@@ -116,6 +123,8 @@ class GJBAuditCliTests(unittest.TestCase):
             "status",
             "--dry-run",
             "--audit",
+            "--outlier-mode",
+            "report-only",
         )
         mle = pd.read_csv(output_dir / "audit" / "tables" / "mle" / "step09_final_mle.csv")
         failure_types = set(mle.loc[mle["gjb_is_failure"].astype(bool), "likelihood_type"])
@@ -143,6 +152,36 @@ class GJBAuditCliTests(unittest.TestCase):
             mle.loc[mle["likelihood_type"] == "ignored_response_le_A4", "gjb_row_id"].astype(int)
         )
         self.assertTrue(excluded_refit_ids.issubset(mle_runout_ids | mle_ignored_ids))
+
+    def test_a2_not_significant_is_note_only_and_mle_continues(self) -> None:
+        input_dir = self.tmpdir / "weak_a2_in"
+        output_dir = self.tmpdir / "weak_a2_out"
+        input_dir.mkdir()
+        self._write_weak_a2_dataset(input_dir / "weak.csv")
+        self._run_cli(
+            "--input",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--pattern",
+            "weak.csv",
+            "--status",
+            "status",
+            "--dry-run",
+            "--audit",
+            "--outlier-mode",
+            "report-only",
+        )
+        significance = pd.read_csv(
+            output_dir / "audit" / "tables" / "weak" / "step06_parameter_significance.csv"
+        )
+        a2_row = significance.loc[significance["parameter"] == "A2"].iloc[0]
+        self.assertFalse(str(a2_row["passed"]).strip().lower() == "true")
+        self.assertFalse(str(a2_row["affects_workflow"]).strip().lower() == "true")
+        self.assertIn("workflow continues", str(a2_row["decision"]))
+        self.assertTrue((output_dir / "audit" / "tables" / "weak" / "step09_final_mle.csv").exists())
+        mle = pd.read_csv(output_dir / "audit" / "tables" / "weak" / "step09_final_mle.csv")
+        self.assertTrue(mle["included_in_final_mle"].astype(bool).any())
 
     def test_weighted_step07_executes_and_unweighted_skips(self) -> None:
         weighted_in = self.tmpdir / "weighted_in"
@@ -303,6 +342,30 @@ class GJBAuditCliTests(unittest.TestCase):
         status = ["failure"] * len(response)
         status[5] = "runout"
         status[10] = "runout"
+        pd.DataFrame({"strain": response, "life": np.round(10**y).astype(int), "status": status}).to_csv(
+            path,
+            index=False,
+        )
+
+    @staticmethod
+    def _write_weak_a2_dataset(path: Path) -> None:
+        response = np.array(
+            [
+                0.016,
+                0.0145,
+                0.013,
+                0.0115,
+                0.010,
+                0.0086,
+                0.0074,
+                0.0064,
+                0.0055,
+                0.0047,
+            ]
+        )
+        noise = np.array([0.08, -0.06, 0.05, -0.09, 0.06, -0.04, 0.07, -0.08, 0.04, -0.05])
+        y = 4.8 - 0.18 * np.log10(response) + noise
+        status = ["failure"] * 8 + ["runout", "runout"]
         pd.DataFrame({"strain": response, "life": np.round(10**y).astype(int), "status": status}).to_csv(
             path,
             index=False,

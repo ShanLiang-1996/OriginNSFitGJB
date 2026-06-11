@@ -79,7 +79,7 @@ output\audit\gjb_manual_checklist.md
 
 `output\audit\gjb_audit_workbook.xlsx` 面向不写程序的复核人员：每个 Step 工作表顶部写明本步骤目的、公式、输入列、输出列和判定规则，下方是逐行数据。`ManualCheck` Sheet 与 `gjb_manual_checklist.md` 列出可在 Excel 中手工复算的检查项。
 
-`gjb_decision_log.csv` 记录流程判定，例如是否加权、参数显著性是否通过、固定 A4 线性修正是否执行、异常值是否删除、runout 是否进入 MLE 的 `logsf` 项。
+`gjb_decision_log.csv` 记录流程判定，例如是否加权、A4 置信区间是否触发固定为 0、A2 是否仅备注为寿命-应变关系不显著、固定 A4 线性修正是否执行、异常值是否删除、runout 是否进入 MLE 的 `logsf` 项。
 
 异常值模式：
 
