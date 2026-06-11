@@ -265,7 +265,9 @@ def run_analysis(
         except OriginAutomationError as exc:
             origin_error = str(exc)
             emit_log(log_callback, f"Origin automation disabled: {exc}", messages)
-            _write_origin_automation_log(output_dir, str(exc))
+            log_path = _write_origin_automation_log(output_dir, str(exc))
+            output_paths.append(log_path)
+            emit_log(log_callback, f"Wrote Origin automation log {log_path}", messages)
         except Exception:
             origin_error = traceback.format_exc()
             emit_log(
@@ -273,7 +275,9 @@ def run_analysis(
                 "Origin automation failed; see origin_automation.log for details.",
                 messages,
             )
-            _write_origin_automation_log(output_dir, origin_error)
+            log_path = _write_origin_automation_log(output_dir, origin_error)
+            output_paths.append(log_path)
+            emit_log(log_callback, f"Wrote Origin automation log {log_path}", messages)
         finally:
             if origin is not None:
                 origin.__exit__(None, None, None)
@@ -447,10 +451,10 @@ def _merge_origin_outputs(
         summary["linearized_figure"] = figures.get("linearized_figure", "")
 
 
-def _write_origin_automation_log(output_dir: Path, message: str) -> None:
+def _write_origin_automation_log(output_dir: Path, message: str) -> Path:
     log_path = output_dir / "origin_automation.log"
     log_path.write_text(message.rstrip() + "\n", encoding="utf-8-sig")
-    print(f"Wrote Origin automation log {log_path}")
+    return log_path
 
 
 def _safe_name(value: str) -> str:

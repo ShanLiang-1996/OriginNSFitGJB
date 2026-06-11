@@ -4,8 +4,10 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from originnsfitgjb.analysis_service import AnalysisConfig, run_analysis
+from originnsfitgjb.origin_client import OriginAutomationError
 
 
 class AnalysisServiceConfigTests(unittest.TestCase):
@@ -75,6 +77,35 @@ class AnalysisServiceRunTests(unittest.TestCase):
         self.assertIn("write_outputs", progress)
         self.assertIn("complete", progress)
         self.assertTrue(any("Wrote" in message for message in logs))
+
+    def test_origin_automation_error_surfaces_log_path_and_message(self) -> None:
+        output_dir = self.tmpdir / "out"
+        log_path = output_dir / "origin_automation.log"
+        logs: list[str] = []
+
+        with patch(
+            "originnsfitgjb.analysis_service.OriginClient",
+            side_effect=OriginAutomationError("boom"),
+        ):
+            result = run_analysis(
+                AnalysisConfig(
+                    input_dir=ROOT / "examples",
+                    output_dir=output_dir,
+                    patterns=("gjb18a_strain_example.csv",),
+                    status_column="status",
+                    dry_run=False,
+                ),
+                log_callback=logs.append,
+            )
+
+        expected_message = f"Wrote Origin automation log {log_path}"
+        self.assertTrue(result.completed)
+        self.assertIsNotNone(result.origin_error)
+        self.assertIn("boom", result.origin_error)
+        self.assertTrue(log_path.exists())
+        self.assertIn(log_path, result.output_paths)
+        self.assertIn(expected_message, result.messages)
+        self.assertIn(expected_message, logs)
 
 
 if __name__ == "__main__":
