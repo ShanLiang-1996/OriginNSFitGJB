@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
+from originnsfitgjb.analysis_service import DEFAULT_PATTERNS
 from originnsfitgjb.gui.settings import GuiSettings, load_settings, save_settings
 
 
@@ -34,6 +36,26 @@ class GuiSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             loaded = load_settings(Path(tmp) / "settings.json")
 
-            self.assertEqual(loaded.recent_patterns, ("*.csv", "*.tsv", "*.txt", "*.xlsx", "*.xls"))
+            self.assertEqual(loaded.recent_patterns, DEFAULT_PATTERNS)
+            self.assertEqual(loaded.window_width, 1120)
+            self.assertEqual(loaded.window_height, 720)
+
+    def test_unknown_settings_keys_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "recent_input_dir": "C:/legacy",
+                        "future_key": "ignore me",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded.recent_input_dir, "C:/legacy")
+            self.assertEqual(loaded.recent_patterns, DEFAULT_PATTERNS)
             self.assertEqual(loaded.window_width, 1120)
             self.assertEqual(loaded.window_height, 720)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import json
 import os
 from pathlib import Path
@@ -61,6 +61,8 @@ def save_settings(settings: GuiSettings, path: Path | None = None) -> None:
 
 def _settings_from_payload(payload: dict[str, Any]) -> GuiSettings:
     defaults = asdict(GuiSettings())
-    merged = {**defaults, **payload}
+    setting_names = {field.name for field in fields(GuiSettings)}
+    known_payload = {key: value for key, value in payload.items() if key in setting_names}
+    merged = {**defaults, **known_payload}
     merged["recent_patterns"] = tuple(merged.get("recent_patterns") or DEFAULT_PATTERNS)
     return GuiSettings(**merged)
