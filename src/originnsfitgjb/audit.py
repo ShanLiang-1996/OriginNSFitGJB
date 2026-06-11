@@ -62,7 +62,7 @@ STEP_PURPOSES = {
     "Step06_ParameterSignificance": "Check A2 negative significance and A4 non-zero significance.",
     "Step07_FixedA4LinearFit": "When weighted, fix A4 and re-estimate A1/A2 linearly.",
     "Step08_ResidualsOutliers": "Report studentized residual outlier decisions and iteration behavior.",
-    "Step09_FinalMLE": "Apply final likelihood correction with failure logpdf and runout logsf terms.",
+    "Step09_FinalMLE": "Apply final likelihood correction with domain-valid failure logpdf and runout logsf terms.",
     "Step10_FinalResidualStatistics": "Compute document-style residual statistics without replacing legacy fields.",
     "Step11_ModelAssessment": "Compute the Durbin-Watson style standardized-residual assessment.",
     "Step12_R2_DocumentStyle": "Compute document-style R2 while preserving r2_log_life.",
@@ -78,7 +78,7 @@ STEP_FORMULAS = {
     "Step06_ParameterSignificance": "A2_upper_90 < 0; A4_lower_90 > 0 or A4_upper_90 < 0",
     "Step07_FixedA4LinearFit": "Y*=y/h; U=1/h; V=X/h; Y*=A1_corrected*U + A2_corrected*V",
     "Step08_ResidualsOutliers": "G=max(abs(studentized residual)); critical=t(1-alpha/(2n), n-k-1)",
-    "Step09_FinalMLE": "failure rows use logpdf; runout rows use logsf; A4 and SD_i fixed",
+    "Step09_FinalMLE": "response>A4 rows enter MLE; failure rows use logpdf; runout rows use logsf; response<=A4 rows are ignored",
     "Step10_FinalResidualStatistics": "weighted: WR=R/h, RMSE=sqrt(sum(WR^2)/(n-k)), SD_i=RMSE*h_i",
     "Step11_ModelAssessment": "D=sum((SR_i-SR_{i-1})^2)/sum(SR_i^2); Dcrit=2-4.73/n^0.555",
     "Step12_R2_DocumentStyle": "R2=1-RMSE^2/RTE^2",
@@ -94,7 +94,7 @@ STEP_INPUTS = {
     "Step06_ParameterSignificance": "Step05 parameters and standard errors",
     "Step07_FixedA4LinearFit": "Step05 refit rows, fixed A4, h and weight",
     "Step08_ResidualsOutliers": "post-significance fit rows and residuals",
-    "Step09_FinalMLE": "active rows, final A4 and SD_i",
+    "Step09_FinalMLE": "active rows after outlier removal, final A4 and SD_i",
     "Step10_FinalResidualStatistics": "final fit rows and final coefficients",
     "Step11_ModelAssessment": "Step10 standardized residuals sorted by response",
     "Step12_R2_DocumentStyle": "Step10 RMSE, h and y values",
@@ -310,8 +310,9 @@ def _manual_check_items() -> list[dict[str, str]]:
         _check("13", "Step07_FixedA4Linear", "only A1/A2 corrected; A4 fixed", "A4_fixed", ""),
         _check("14", "Step07_FixedA4Linear", "A1^2 and A2^2 are corrected params, not squares", "A1_corrected,A2_corrected", ""),
         _check("15", "Step10_FinalResiduals", "three-parameter model k=3", "k", ""),
-        _check("16", "Step09_FinalMLE", "runout likelihood uses logsf", "likelihood_type", ""),
+        _check("16", "Step09_FinalMLE", "domain-valid runout likelihood uses logsf", "likelihood_type", ""),
         _check("17", "Origin workbook", "Origin Direct Weighting receives 1/h^2, not h", "weight", ""),
+        _check("18", "Step09_FinalMLE", "rows with response <= A4 are ignored in MLE", "domain_valid,included_in_final_mle,A4_final_mle", ""),
     ]
 
 
