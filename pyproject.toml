@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 origin-ns-fit-gjb = "originnsfitgjb.cli:main"
+origin-ns-fit-gjb-gui = "originnsfitgjb.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
