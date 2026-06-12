@@ -355,8 +355,8 @@ class Gjb18aPage(QWidget):
             raise ValueError("置信度必须是数字。") from None
         if not math.isfinite(confidence):
             raise ValueError("置信度必须是有限数字。")
-        if not ((0.0 < confidence < 1.0) or (1.0 < confidence <= 100.0)):
-            raise ValueError("置信度必须满足 0 < 置信度 < 1，或 1 < 置信度 <= 100。")
+        if not ((0.0 < confidence < 1.0) or (1.0 < confidence < 100.0)):
+            raise ValueError("置信度必须满足 0 < 置信度 < 1，或 1 < 置信度 < 100。")
         return confidence
 
     @staticmethod

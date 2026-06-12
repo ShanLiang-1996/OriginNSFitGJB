@@ -103,7 +103,7 @@ class Gjb18aPageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as input_tmp:
             page._input_dir.setText(input_tmp)
-            invalid_values = ("0", "-0.1", "1.0", "101")
+            invalid_values = ("0", "-0.1", "1.0", "100", "101")
             for value in invalid_values:
                 with self.subTest(value=value):
                     page._confidence.setText(value)
