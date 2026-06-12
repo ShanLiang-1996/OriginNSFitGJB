@@ -16,11 +16,20 @@ class AnalysisWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        result: AnalysisRunResult = run_analysis(
-            self._config,
-            progress_callback=self._emit_progress,
-            log_callback=self.log.emit,
-        )
+        try:
+            result: AnalysisRunResult = run_analysis(
+                self._config,
+                progress_callback=self._emit_progress,
+                log_callback=self.log.emit,
+            )
+        except Exception as exc:
+            message = f"Unexpected GUI worker failure: {exc}"
+            self.log.emit(message)
+            result = AnalysisRunResult(
+                completed=False,
+                messages=(message,),
+                origin_error=str(exc),
+            )
         self.finished.emit(result)
 
     def _emit_progress(self, event: AnalysisProgress) -> None:
