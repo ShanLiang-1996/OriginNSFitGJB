@@ -308,10 +308,15 @@ class Gjb18aPage(QWidget):
         )
 
     def _on_progress(self, event: AnalysisProgress) -> None:
+        message = self._format_progress_message(event)
+        self._status_label.setText(message)
+        self._append_log(message)
+
+    @staticmethod
+    def _format_progress_message(event: AnalysisProgress) -> str:
         if event.total:
-            self._status_label.setText(f"{event.message} ({event.current}/{event.total})")
-        else:
-            self._status_label.setText(event.message)
+            return f"{event.message} ({event.current}/{event.total})"
+        return event.message
 
     def _append_log(self, message: str) -> None:
         self._log.append(message)
@@ -331,13 +336,22 @@ class Gjb18aPage(QWidget):
                 "Origin 自动化异常",
                 "Python 输出已完成，但 Origin 生成失败。请查看 origin_automation.log。",
             )
-        for path in result.output_paths:
-            self._add_output_button(path)
+        self._add_output_buttons(result.output_paths)
         if not self._thread_is_running(self._thread):
             self._clear_worker_refs()
 
-    def _add_output_button(self, path: Path) -> None:
-        button = QPushButton(path.name)
+    def _add_output_buttons(self, paths: tuple[Path, ...]) -> None:
+        if len(paths) <= 3:
+            for path in paths:
+                self._add_output_button(path)
+            return
+
+        self._add_output_button(self._output_root_from_paths(paths), "打开输出目录")
+        for path in self._select_key_output_paths(paths, limit=2):
+            self._add_output_button(path)
+
+    def _add_output_button(self, path: Path, label: str | None = None) -> None:
+        button = QPushButton(label or path.name)
         button.setToolTip(str(path))
         button.clicked.connect(
             lambda checked=False, output_path=path: QDesktopServices.openUrl(
@@ -347,6 +361,35 @@ class Gjb18aPage(QWidget):
         insert_index = max(0, self._outputs_layout.count() - 1)
         self._outputs_layout.insertWidget(insert_index, button)
         self._output_buttons.append(button)
+
+    @staticmethod
+    def _output_root_from_paths(paths: tuple[Path, ...]) -> Path:
+        for path in paths:
+            if path.name == "gjb_summary.csv":
+                return path.parent
+        return paths[0].parent
+
+    @staticmethod
+    def _select_key_output_paths(paths: tuple[Path, ...], *, limit: int) -> tuple[Path, ...]:
+        priority_names = (
+            "gjb_summary.csv",
+            "gjb_audit_workbook.xlsx",
+            "origin_automation.log",
+            "gjb_decision_log.csv",
+            "gjb_curve.csv",
+        )
+        selected: list[Path] = []
+        remaining = list(paths)
+        for name in priority_names:
+            for path in remaining:
+                if path.name == name:
+                    selected.append(path)
+                    remaining.remove(path)
+                    break
+            if len(selected) >= limit:
+                return tuple(selected)
+        selected.extend(remaining[: max(0, limit - len(selected))])
+        return tuple(selected)
 
     def _clear_outputs(self) -> None:
         for button in self._output_buttons:

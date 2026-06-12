@@ -10,7 +10,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from originnsfitgjb.analysis_service import AnalysisConfig, AnalysisRunResult, AnalysisTableFailure
+from originnsfitgjb.analysis_service import (
+    AnalysisConfig,
+    AnalysisProgress,
+    AnalysisRunResult,
+    AnalysisTableFailure,
+)
 from originnsfitgjb.gui.modules.gjb18a_page import Gjb18aPage
 from originnsfitgjb.gui.settings import GuiSettings
 
@@ -293,6 +298,51 @@ class Gjb18aPageTests(unittest.TestCase):
             self.assertEqual(page._output_buttons[0].toolTip(), str(output_path))
             self.assertIsNone(page._thread)
             self.assertIsNone(page._worker)
+
+    def test_on_finished_limits_output_buttons_for_many_files(self) -> None:
+        page = Gjb18aPage()
+        self.addCleanup(page.deleteLater)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            paths = []
+            for name in (
+                "gjb_summary.csv",
+                "gjb_fit_data.csv",
+                "gjb_curve.csv",
+                "gjb_level_stats.csv",
+                "gjb_decisionlog.csv",
+                "gjb_finalmle.csv",
+            ):
+                path = output_dir / name
+                path.write_text("data", encoding="utf-8")
+                paths.append(path)
+            workbook = output_dir / "audit" / "gjb_audit_workbook.xlsx"
+            workbook.parent.mkdir()
+            workbook.write_text("workbook", encoding="utf-8")
+            paths.append(workbook)
+
+            page._on_finished(AnalysisRunResult(completed=True, output_paths=tuple(paths)))
+
+            button_texts = [button.text() for button in page._output_buttons]
+            self.assertLessEqual(len(button_texts), 3)
+            self.assertIn("打开输出目录", button_texts)
+            self.assertIn("gjb_summary.csv", button_texts)
+
+    def test_progress_events_are_appended_to_log(self) -> None:
+        page = Gjb18aPage()
+        self.addCleanup(page.deleteLater)
+
+        page._on_progress(
+            AnalysisProgress(
+                phase="fit",
+                message="Running GJB analyses.",
+                current=1,
+                total=3,
+            )
+        )
+
+        self.assertIn("Running GJB analyses. (1/3)", page._log.toPlainText())
 
     def test_on_finished_displays_partial_success_failures(self) -> None:
         page = Gjb18aPage()

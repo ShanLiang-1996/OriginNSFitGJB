@@ -225,6 +225,9 @@ def run_analysis(
                     fit=fit,
                 )
             )
+            emit_log(log_callback, _fit_completion_message(label, fit), messages)
+            for decision_message in _workflow_decision_messages(label, fit):
+                emit_log(log_callback, decision_message, messages)
         emit_progress(
             progress_callback,
             "fit",
@@ -308,8 +311,7 @@ def run_analysis(
                 origin.__exit__(None, None, None)
 
     existing_paths = tuple(output_path for output_path in output_paths if output_path.exists())
-    for output_path in existing_paths:
-        emit_log(log_callback, f"Wrote {output_path}", messages)
+    _emit_output_summary(existing_paths, log_callback, messages)
 
     emit_progress(progress_callback, "complete", "Analysis complete.")
     return AnalysisRunResult(
@@ -474,6 +476,96 @@ def _merge_origin_outputs(
         figures = figures_by_label.get(str(summary["label"]), {})
         summary["engineering_figure"] = figures.get("engineering_figure", "")
         summary["linearized_figure"] = figures.get("linearized_figure", "")
+
+
+def _fit_completion_message(label: str, fit: GJBFit) -> str:
+    result = fit.result
+    return (
+        f"Completed {label}: model={result.model_name}, "
+        f"points={result.points}, failures={result.n_failure}, runouts={result.n_runout}, "
+        f"r2={result.r2:.4g}, confidence={result.confidence:g}."
+    )
+
+
+def _workflow_decision_messages(label: str, fit: GJBFit) -> tuple[str, ...]:
+    decision_log = fit.decision_log
+    if decision_log is None or decision_log.empty:
+        return ()
+
+    messages: list[str] = []
+    for step_id in ("Step03_VarianceAnalysis", "Step06_ParamSignif", "Step08_ResidualsOutliers", "Step09_FinalMLE"):
+        if "step_id" not in decision_log.columns:
+            break
+        rows = decision_log[decision_log["step_id"].astype(str) == step_id]
+        if rows.empty:
+            continue
+        row = rows.iloc[-1]
+        decision = _clean_log_value(row.get("decision", ""))
+        reason = _clean_log_value(row.get("reason", ""))
+        suffix = f" ({reason})" if reason else ""
+        messages.append(f"Workflow decision {label} {step_id}: {decision}{suffix}")
+    return tuple(messages)
+
+
+def _emit_output_summary(
+    output_paths: tuple[Path, ...],
+    log_callback: LogCallback | None,
+    messages: list[str],
+) -> None:
+    if not output_paths:
+        return
+
+    emit_log(
+        log_callback,
+        f"Wrote {len(output_paths)} output files under {_output_root_from_paths(output_paths)}.",
+        messages,
+    )
+    key_paths = _select_key_output_paths(output_paths, limit=4)
+    for path in key_paths:
+        emit_log(log_callback, f"Key output: {path}", messages)
+    remaining = len(output_paths) - len(key_paths)
+    if remaining > 0:
+        emit_log(log_callback, f"... and {remaining} more output file(s).", messages)
+
+
+def _output_root_from_paths(paths: tuple[Path, ...]) -> Path:
+    for path in paths:
+        if path.name == "gjb_summary.csv":
+            return path.parent
+    return paths[0].parent
+
+
+def _select_key_output_paths(paths: tuple[Path, ...], *, limit: int) -> tuple[Path, ...]:
+    priority_names = (
+        "gjb_summary.csv",
+        "gjb_audit_workbook.xlsx",
+        "origin_automation.log",
+        "gjb_decision_log.csv",
+        "gjb_curve.csv",
+    )
+    selected: list[Path] = []
+    remaining = list(paths)
+    for name in priority_names:
+        for path in remaining:
+            if path.name == name:
+                selected.append(path)
+                remaining.remove(path)
+                break
+        if len(selected) >= limit:
+            return tuple(selected)
+    selected.extend(remaining[: max(0, limit - len(selected))])
+    return tuple(selected)
+
+
+def _clean_log_value(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
 
 
 def _write_origin_automation_log(output_dir: Path, message: str) -> Path:
