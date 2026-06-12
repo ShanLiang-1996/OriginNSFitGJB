@@ -67,6 +67,8 @@ The executable is written to:
 dist\OriginNSFitGJB.exe
 ```
 
+如需构建或运行 GUI 版本，离线 wheelhouse 还需要包含 `requirements-gui.txt` 中的 PySide6 相关 wheel。更新 wheelhouse 后再运行离线安装脚本。
+
 ## Refresh Wheelhouse
 
 On an online Windows machine with the intended Python version:

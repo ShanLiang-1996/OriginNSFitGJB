@@ -58,6 +58,22 @@ GJB-005,0.0065,3500,runout
 .\.venv\Scripts\python.exe -m originnsfitgjb --input data --output output --life "life" --response "strain" --status "status" --dry-run
 ```
 
+## Windows 图形界面
+
+安装 GUI 依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-gui.txt
+```
+
+启动 GUI：
+
+```powershell
+.\.venv\Scripts\python.exe -m originnsfitgjb.gui
+```
+
+图形界面首版提供 `GJB/Z 18A 分析` 模块。选择输入目录、输出目录、列名和 Origin 选项后，点击 `开始全流程分析` 会直接执行 CSV/审计输出和 Origin 项目生成。
+
 ## 审计输出
 
 需要人工复核每一步计算时，启用审计模式：
@@ -159,6 +175,18 @@ output\gjb_r2documentstyle.csv
 
 ```text
 dist\OriginNSFitGJB.exe
+```
+
+GUI 打包：
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe OriginNSFitGJB-GUI.spec
+```
+
+打包结果：
+
+```text
+dist\OriginNSFitGJB-GUI.exe
 ```
 
 ## Origin 排错

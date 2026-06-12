@@ -47,6 +47,16 @@ Build executable:
 .\.venv\Scripts\pyinstaller.exe OriginNSFitGJB.spec
 ```
 
+## 图形界面
+
+运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m originnsfitgjb.gui
+```
+
+界面字段与命令行参数一一对应。首版主按钮会直接执行完整流程，包括 Origin 自动化。若 Python 侧 CSV 和审计输出已完成但 Origin 失败，请打开输出目录中的 `origin_automation.log` 查看原因。
+
 ## Output Tables
 
 `gjb_summary.csv` contains one row per fitted table, including A1/A2/A4, confidence intervals, likelihood, residual statistics, formulas, and Origin output paths.
