@@ -77,6 +77,29 @@ class AnalysisServiceRunTests(unittest.TestCase):
         self.assertIn("write_outputs", progress)
         self.assertIn("complete", progress)
         self.assertTrue(any("Wrote" in message for message in logs))
+        self.assertTrue(any("Workflow decision" in message for message in logs))
+
+    def test_output_logs_are_summarized_instead_of_one_line_per_file(self) -> None:
+        output_dir = self.tmpdir / "out-summary"
+        logs: list[str] = []
+
+        result = run_analysis(
+            AnalysisConfig(
+                input_dir=ROOT / "examples",
+                output_dir=output_dir,
+                patterns=("gjb18a_strain_example.csv",),
+                status_column="status",
+                dry_run=True,
+                audit=True,
+                audit_workbook=True,
+            ),
+            log_callback=logs.append,
+        )
+
+        wrote_messages = [message for message in logs if message.startswith("Wrote ")]
+        self.assertGreater(len(result.output_paths), 5)
+        self.assertLess(len(wrote_messages), len(result.output_paths))
+        self.assertTrue(any("output files" in message for message in wrote_messages))
 
     def test_origin_automation_error_surfaces_log_path_and_message(self) -> None:
         output_dir = self.tmpdir / "out"
