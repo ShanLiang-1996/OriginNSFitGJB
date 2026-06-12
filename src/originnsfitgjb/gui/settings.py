@@ -44,8 +44,11 @@ def load_settings(path: Path | None = None) -> GuiSettings:
     settings_path = path or default_settings_path()
     if not settings_path.exists():
         return GuiSettings()
-    payload = json.loads(settings_path.read_text(encoding="utf-8-sig"))
-    return _settings_from_payload(payload)
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+        return _settings_from_payload(payload)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return GuiSettings()
 
 
 def save_settings(settings: GuiSettings, path: Path | None = None) -> None:
@@ -60,6 +63,8 @@ def save_settings(settings: GuiSettings, path: Path | None = None) -> None:
 
 
 def _settings_from_payload(payload: dict[str, Any]) -> GuiSettings:
+    if not isinstance(payload, dict):
+        return GuiSettings()
     defaults = asdict(GuiSettings())
     setting_names = {field.name for field in fields(GuiSettings)}
     known_payload = {key: value for key, value in payload.items() if key in setting_names}

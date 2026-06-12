@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         return page
 
     def closeEvent(self, event: object) -> None:
+        self._shutdown_pages()
         settings = load_settings()
         save_settings(
             replace(
@@ -68,3 +69,10 @@ class MainWindow(QMainWindow):
             )
         )
         super().closeEvent(event)
+
+    def _shutdown_pages(self) -> None:
+        for index in range(self._pages.count()):
+            page = self._pages.widget(index)
+            shutdown = getattr(page, "shutdown", None)
+            if callable(shutdown):
+                shutdown()

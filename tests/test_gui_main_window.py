@@ -59,6 +59,27 @@ class MainWindowTests(unittest.TestCase):
         load_settings_mock.assert_called_once_with()
         save_settings_mock.assert_called_once_with(expected_settings)
 
+    def test_close_event_shuts_down_module_pages(self) -> None:
+        shutdown_calls: list[str] = []
+
+        class ShutdownPage(QWidget):
+            def shutdown(self) -> None:
+                shutdown_calls.append("shutdown")
+
+        def create_page(*_args: object) -> QWidget:
+            return ShutdownPage()
+
+        window = MainWindow(self._registry_with_factory(create_page), GuiSettings())
+        self.addCleanup(window.deleteLater)
+
+        with (
+            patch("originnsfitgjb.gui.main_window.load_settings", return_value=GuiSettings(), create=True),
+            patch("originnsfitgjb.gui.main_window.save_settings", create=True),
+        ):
+            window.closeEvent(QCloseEvent())
+
+        self.assertEqual(shutdown_calls, ["shutdown"])
+
     @staticmethod
     def _registry_with_factory(create_page: object) -> ModuleRegistry:
         registry = ModuleRegistry()

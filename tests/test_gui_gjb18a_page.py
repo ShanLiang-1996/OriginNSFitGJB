@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from originnsfitgjb.analysis_service import AnalysisConfig, AnalysisRunResult
+from originnsfitgjb.analysis_service import AnalysisConfig, AnalysisRunResult, AnalysisTableFailure
 from originnsfitgjb.gui.modules.gjb18a_page import Gjb18aPage
 from originnsfitgjb.gui.settings import GuiSettings
 
@@ -293,6 +293,20 @@ class Gjb18aPageTests(unittest.TestCase):
             self.assertEqual(page._output_buttons[0].toolTip(), str(output_path))
             self.assertIsNone(page._thread)
             self.assertIsNone(page._worker)
+
+    def test_on_finished_displays_partial_success_failures(self) -> None:
+        page = Gjb18aPage()
+        self.addCleanup(page.deleteLater)
+
+        page._on_finished(
+            AnalysisRunResult(
+                completed=True,
+                table_failures=(AnalysisTableFailure(label="bad", message="cannot read"),),
+            )
+        )
+
+        self.assertEqual(page._status_label.text(), "部分完成")
+        self.assertIn("bad: cannot read", page._log.toPlainText())
 
     def test_shutdown_worker_requests_thread_stop_and_keeps_refs_when_still_running(self) -> None:
         page = Gjb18aPage()

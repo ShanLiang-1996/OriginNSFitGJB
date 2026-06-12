@@ -319,6 +319,12 @@ class Gjb18aPage(QWidget):
     def _on_finished(self, result: AnalysisRunResult) -> None:
         self._run_button.setEnabled(True)
         self._status_label.setText("分析完成" if result.completed else "分析失败")
+        if result.table_failures:
+            if result.completed:
+                self._status_label.setText("部分完成")
+            self._append_log(f"部分表格失败：{len(result.table_failures)} 个")
+            for failure in result.table_failures:
+                self._append_log(f"- {failure.label}: {failure.message}")
         if result.origin_error:
             QMessageBox.warning(
                 self,
@@ -368,8 +374,11 @@ class Gjb18aPage(QWidget):
 
         self._keep_worker_refs_until_finished(thread, self._worker)
 
-    def closeEvent(self, event: object) -> None:
+    def shutdown(self) -> None:
         self._shutdown_worker()
+
+    def closeEvent(self, event: object) -> None:
+        self.shutdown()
         super().closeEvent(event)
 
     @staticmethod

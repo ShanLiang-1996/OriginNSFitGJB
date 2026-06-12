@@ -59,3 +59,21 @@ class GuiSettingsTests(unittest.TestCase):
             self.assertEqual(loaded.recent_patterns, DEFAULT_PATTERNS)
             self.assertEqual(loaded.window_width, 1120)
             self.assertEqual(loaded.window_height, 720)
+
+    def test_invalid_settings_json_returns_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text("{not json", encoding="utf-8")
+
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded, GuiSettings())
+
+    def test_non_object_settings_json_returns_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(["not", "a", "settings", "object"]), encoding="utf-8")
+
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded, GuiSettings())

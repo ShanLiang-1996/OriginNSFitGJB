@@ -140,8 +140,26 @@ def run_analysis(
     audit_records: list[AuditRecord] = []
 
     emit_progress(progress_callback, "fit", "Running GJB analyses.", total=len(files))
-    for path in files:
-        for table in read_table(path):
+    for file_index, path in enumerate(files, start=1):
+        try:
+            tables = read_table(path)
+        except Exception as exc:
+            failures.append(AnalysisTableFailure(label=_safe_name(path.stem), message=str(exc)))
+            emit_log(
+                log_callback,
+                f"Failed to read {path}: {exc}",
+                messages,
+            )
+            emit_progress(
+                progress_callback,
+                "fit",
+                f"Finished {path.name}.",
+                current=file_index,
+                total=len(files),
+            )
+            continue
+
+        for table in tables:
             label = _safe_name(table.label)
             try:
                 life_column, response_column = strain_life_columns(
@@ -207,6 +225,13 @@ def run_analysis(
                     fit=fit,
                 )
             )
+        emit_progress(
+            progress_callback,
+            "fit",
+            f"Finished {path.name}.",
+            current=file_index,
+            total=len(files),
+        )
 
     if not summaries:
         emit_log(log_callback, "No GJB analyses were completed.", messages)

@@ -107,6 +107,36 @@ class AnalysisServiceRunTests(unittest.TestCase):
         self.assertIn(expected_message, result.messages)
         self.assertIn(expected_message, logs)
 
+    def test_read_failure_records_table_failure_and_continues_other_files(self) -> None:
+        input_dir = self.tmpdir / "input"
+        output_dir = self.tmpdir / "out"
+        input_dir.mkdir()
+        shutil.copy(ROOT / "examples" / "gjb18a_strain_example.csv", input_dir / "good.csv")
+        (input_dir / "bad.xlsx").write_text("not an excel workbook", encoding="utf-8")
+        progress_events: list[object] = []
+
+        result = run_analysis(
+            AnalysisConfig(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                patterns=("*.csv", "*.xlsx"),
+                status_column="status",
+                dry_run=True,
+            ),
+            progress_callback=progress_events.append,
+        )
+
+        fit_progress = [
+            (event.current, event.total)
+            for event in progress_events
+            if getattr(event, "phase", None) == "fit"
+        ]
+        self.assertTrue(result.completed)
+        self.assertEqual(len(result.table_failures), 1)
+        self.assertEqual(result.table_failures[0].label, "bad")
+        self.assertTrue((output_dir / "gjb_summary.csv").exists())
+        self.assertIn((2, 2), fit_progress)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,7 +55,7 @@ Build executable:
 .\.venv\Scripts\python.exe -m originnsfitgjb.gui
 ```
 
-界面字段与命令行参数一一对应。首版主按钮会直接执行完整流程，包括 Origin 自动化。若 Python 侧 CSV 和审计输出已完成但 Origin 失败，请打开输出目录中的 `origin_automation.log` 查看原因。
+界面字段覆盖常用输入、输出、拟合、审计和主要 Origin 选项；高级命令行参数仍可通过 CLI 使用。首版主按钮会直接执行完整流程，包括 Origin 自动化。若 Python 侧 CSV 和审计输出已完成但 Origin 失败，请打开输出目录中的 `origin_automation.log` 查看原因。
 
 ## Output Tables
 
