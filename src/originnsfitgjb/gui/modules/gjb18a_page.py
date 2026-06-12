@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 from pathlib import Path
+import weakref
 
 from PySide6.QtCore import QThread, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -26,12 +28,17 @@ from ...analysis_service import AnalysisConfig, AnalysisProgress, AnalysisRunRes
 from ..worker import AnalysisWorker
 
 
+_DETACHED_WORKER_REFS: list[tuple[QThread, AnalysisWorker | None]] = []
+
+
 class Gjb18aPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._thread: QThread | None = None
         self._worker: AnalysisWorker | None = None
         self._output_buttons: list[QPushButton] = []
+        page_ref = weakref.ref(self)
+        self.destroyed.connect(lambda _obj=None: Gjb18aPage._shutdown_destroyed_page(page_ref))
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -128,7 +135,6 @@ class Gjb18aPage(QWidget):
         form.addRow("Origin 项目路径", self._path_row(self._project_path, self._choose_project_path))
 
         self._graph_template_path = QLineEdit()
-        self._graph_template = self._graph_template_path
         form.addRow(
             "Origin 图模板",
             self._path_row(self._graph_template_path, self._choose_graph_template),
@@ -194,7 +200,7 @@ class Gjb18aPage(QWidget):
         self._run_button.setEnabled(False)
         self._status_label.setText("正在启动分析")
 
-        thread = QThread(self)
+        thread = QThread()
         worker = AnalysisWorker(config)
         worker.moveToThread(thread)
 
@@ -217,6 +223,7 @@ class Gjb18aPage(QWidget):
         if not input_dir.is_dir():
             raise ValueError(f"输入目录不存在：{input_dir}")
 
+        confidence = self._confidence_from_form()
         patterns = tuple(
             item.strip()
             for item in self._patterns.text().replace(",", ";").split(";")
@@ -230,7 +237,7 @@ class Gjb18aPage(QWidget):
             response_column=self._text_or_none(self._response_column),
             status_column=self._text_or_none(self._status_column),
             level_column=self._text_or_none(self._level_column),
-            confidence=float(self._confidence.text().strip()),
+            confidence=confidence,
             fit_points=self._fit_points.value(),
             dry_run=False,
             audit=self._audit.isChecked(),
@@ -264,6 +271,8 @@ class Gjb18aPage(QWidget):
             )
         for path in result.output_paths:
             self._add_output_button(path)
+        if not self._thread_is_running(self._thread):
+            self._clear_worker_refs()
 
     def _add_output_button(self, path: Path) -> None:
         button = QPushButton(path.name)
@@ -286,6 +295,69 @@ class Gjb18aPage(QWidget):
     def _clear_worker_refs(self) -> None:
         self._thread = None
         self._worker = None
+
+    def _shutdown_worker(self, timeout_ms: int = 1000) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        if not self._thread_is_running(thread):
+            self._clear_worker_refs()
+            return
+
+        thread.requestInterruption()
+        thread.quit()
+        if thread.wait(timeout_ms):
+            self._clear_worker_refs()
+            return
+
+        self._keep_worker_refs_until_finished(thread, self._worker)
+
+    def closeEvent(self, event: object) -> None:
+        self._shutdown_worker()
+        super().closeEvent(event)
+
+    @staticmethod
+    def _shutdown_destroyed_page(page_ref: weakref.ReferenceType[Gjb18aPage]) -> None:
+        page = page_ref()
+        if page is not None:
+            page._shutdown_worker()
+
+    @staticmethod
+    def _thread_is_running(thread: object | None) -> bool:
+        if thread is None:
+            return False
+        try:
+            return bool(thread.isRunning())
+        except RuntimeError:
+            return False
+
+    @staticmethod
+    def _keep_worker_refs_until_finished(thread: object, worker: AnalysisWorker | None) -> None:
+        if not isinstance(thread, QThread):
+            return
+        refs = (thread, worker)
+        if refs in _DETACHED_WORKER_REFS:
+            return
+        _DETACHED_WORKER_REFS.append(refs)
+        thread.setParent(None)
+
+        def release_refs() -> None:
+            if refs in _DETACHED_WORKER_REFS:
+                _DETACHED_WORKER_REFS.remove(refs)
+
+        thread.finished.connect(release_refs)
+
+    def _confidence_from_form(self) -> float:
+        raw_value = self._confidence.text().strip()
+        try:
+            confidence = float(raw_value)
+        except ValueError:
+            raise ValueError("置信度必须是数字。") from None
+        if not math.isfinite(confidence):
+            raise ValueError("置信度必须是有限数字。")
+        if not ((0.0 < confidence < 1.0) or (1.0 < confidence <= 100.0)):
+            raise ValueError("置信度必须满足 0 < 置信度 < 1，或 1 < 置信度 <= 100。")
+        return confidence
 
     @staticmethod
     def _text_or_none(line_edit: QLineEdit) -> str | None:
