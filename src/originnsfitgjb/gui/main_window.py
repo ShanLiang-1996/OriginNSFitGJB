@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -13,8 +13,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .modules.base import PageFactory
 from .modules.registry import ModuleRegistry
-from .settings import GuiSettings
+from .settings import GuiSettings, load_settings, save_settings
 
 
 class MainWindow(QMainWindow):
@@ -51,8 +52,19 @@ class MainWindow(QMainWindow):
         if self._navigation.count():
             self._navigation.setCurrentRow(0)
 
-    def _create_module_page(self, title: str, create_page: Callable[[], object]) -> QWidget:
-        page = create_page()
+    def _create_module_page(self, title: str, create_page: PageFactory) -> QWidget:
+        page = create_page(self._settings)
         if not isinstance(page, QWidget):
             raise TypeError(f"GUI module {title} did not create a QWidget.")
         return page
+
+    def closeEvent(self, event: object) -> None:
+        settings = load_settings()
+        save_settings(
+            replace(
+                settings,
+                window_width=self.width(),
+                window_height=self.height(),
+            )
+        )
+        super().closeEvent(event)

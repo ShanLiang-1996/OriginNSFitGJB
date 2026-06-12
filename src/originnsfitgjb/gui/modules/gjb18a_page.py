@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...analysis_service import AnalysisConfig, AnalysisProgress, AnalysisRunResult
+from ..settings import GuiSettings, save_settings
 from ..worker import AnalysisWorker
 
 
@@ -32,14 +33,16 @@ _DETACHED_WORKER_REFS: list[tuple[QThread, AnalysisWorker | None]] = []
 
 
 class Gjb18aPage(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, settings: GuiSettings | None = None) -> None:
         super().__init__()
+        self._settings = settings or GuiSettings()
         self._thread: QThread | None = None
         self._worker: AnalysisWorker | None = None
         self._output_buttons: list[QPushButton] = []
         page_ref = weakref.ref(self)
         self.destroyed.connect(lambda _obj=None: Gjb18aPage._shutdown_destroyed_page(page_ref))
         self._build_ui()
+        self._apply_settings(self._settings)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -64,6 +67,62 @@ class Gjb18aPage(QWidget):
         layout.addWidget(self._log, 1)
 
         layout.addWidget(self._build_outputs_group())
+
+    def _apply_settings(self, settings: GuiSettings) -> None:
+        self._input_dir.setText(settings.recent_input_dir)
+        self._patterns.setText(";".join(settings.recent_patterns))
+        self._output_dir.setText(settings.recent_output_dir)
+        self._life_column.setText(settings.life_column)
+        self._response_column.setText(settings.response_column)
+        self._status_column.setText(settings.status_column)
+        self._level_column.setText(settings.level_column)
+        self._confidence.setText(str(settings.confidence))
+        self._fit_points.setValue(settings.fit_points)
+
+        outlier_index = self._outlier_mode.findData(settings.outlier_mode)
+        if outlier_index >= 0:
+            self._outlier_mode.setCurrentIndex(outlier_index)
+
+        self._audit.setChecked(settings.audit)
+        self._audit_workbook.setChecked(settings.audit_workbook)
+        self._audit_json.setChecked(settings.audit_json)
+        self._hidden_origin.setChecked(settings.hidden_origin)
+        self._linearized_graph.setChecked(settings.linearized_graph)
+        self._no_runout_arrows.setChecked(settings.no_runout_arrows)
+        self._project_path.setText(settings.project_path)
+        self._graph_template_path.setText(settings.graph_template_path)
+
+    def _settings_from_form(self) -> GuiSettings:
+        window = self.window()
+        return GuiSettings(
+            recent_input_dir=self._input_dir.text().strip(),
+            recent_output_dir=self._output_dir.text().strip(),
+            recent_patterns=self._patterns_from_form(),
+            life_column=self._life_column.text().strip(),
+            response_column=self._response_column.text().strip(),
+            status_column=self._status_column.text().strip(),
+            level_column=self._level_column.text().strip(),
+            confidence=self._confidence_from_form(),
+            fit_points=self._fit_points.value(),
+            outlier_mode=str(self._outlier_mode.currentData()),
+            audit=self._audit.isChecked(),
+            audit_workbook=self._audit_workbook.isChecked(),
+            audit_json=self._audit_json.isChecked(),
+            hidden_origin=self._hidden_origin.isChecked(),
+            linearized_graph=self._linearized_graph.isChecked(),
+            no_runout_arrows=self._no_runout_arrows.isChecked(),
+            graph_template_path=self._graph_template_path.text().strip(),
+            project_path=self._project_path.text().strip(),
+            window_width=window.width(),
+            window_height=window.height(),
+        )
+
+    def _patterns_from_form(self) -> tuple[str, ...]:
+        return tuple(
+            item.strip()
+            for item in self._patterns.text().replace(",", ";").split(";")
+            if item.strip()
+        )
 
     def _build_input_group(self) -> QGroupBox:
         group = QGroupBox("输入与列设置")
@@ -195,6 +254,7 @@ class Gjb18aPage(QWidget):
             QMessageBox.warning(self, "配置错误", str(exc))
             return
 
+        save_settings(self._settings_from_form())
         self._clear_outputs()
         self._log.clear()
         self._run_button.setEnabled(False)
@@ -224,11 +284,7 @@ class Gjb18aPage(QWidget):
             raise ValueError(f"输入目录不存在：{input_dir}")
 
         confidence = self._confidence_from_form()
-        patterns = tuple(
-            item.strip()
-            for item in self._patterns.text().replace(",", ";").split(";")
-            if item.strip()
-        )
+        patterns = self._patterns_from_form()
         return AnalysisConfig(
             input_dir=input_dir,
             output_dir=output_dir,

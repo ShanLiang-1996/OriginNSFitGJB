@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..settings import GuiSettings
 from .base import GuiModule
 
 
@@ -12,7 +13,7 @@ def create_gjb18a_module() -> GuiModule:
     )
 
 
-def _create_page() -> object:
+def _create_page(settings: GuiSettings) -> object:
     from .gjb18a_page import Gjb18aPage
 
-    return Gjb18aPage()
+    return Gjb18aPage(settings)
