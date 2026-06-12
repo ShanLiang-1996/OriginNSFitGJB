@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from originnsfitgjb.analysis_service import DEFAULT_PATTERNS
+from originnsfitgjb.gui.settings import GuiSettings, load_settings, save_settings
+
+
+class GuiSettingsTests(unittest.TestCase):
+    def test_settings_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            settings = GuiSettings(
+                recent_input_dir="C:/data",
+                recent_output_dir="C:/out",
+                recent_patterns=("*.csv", "*.xlsx"),
+                life_column="life",
+                response_column="strain",
+                status_column="status",
+                audit=True,
+                audit_workbook=True,
+                hidden_origin=True,
+                window_width=1200,
+                window_height=760,
+            )
+
+            save_settings(settings, path)
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded, settings)
+
+    def test_missing_settings_file_returns_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = load_settings(Path(tmp) / "settings.json")
+
+            self.assertEqual(loaded.recent_patterns, DEFAULT_PATTERNS)
+            self.assertEqual(loaded.window_width, 1120)
+            self.assertEqual(loaded.window_height, 720)
+
+    def test_unknown_settings_keys_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "recent_input_dir": "C:/legacy",
+                        "future_key": "ignore me",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded.recent_input_dir, "C:/legacy")
+            self.assertEqual(loaded.recent_patterns, DEFAULT_PATTERNS)
+            self.assertEqual(loaded.window_width, 1120)
+            self.assertEqual(loaded.window_height, 720)
+
+    def test_invalid_settings_json_returns_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text("{not json", encoding="utf-8")
+
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded, GuiSettings())
+
+    def test_non_object_settings_json_returns_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(["not", "a", "settings", "object"]), encoding="utf-8")
+
+            loaded = load_settings(path)
+
+            self.assertEqual(loaded, GuiSettings())

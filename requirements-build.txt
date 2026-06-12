@@ -1,4 +1,5 @@
 -r requirements.txt
+-r requirements-gui.txt
 pyinstaller>=6.10
 setuptools>=69
 wheel>=0.43

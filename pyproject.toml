@@ -20,6 +20,10 @@ dependencies = [
 
 [project.scripts]
 origin-ns-fit-gjb = "originnsfitgjb.cli:main"
+origin-ns-fit-gjb-gui = "originnsfitgjb.gui.app:main"
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.8,<7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
